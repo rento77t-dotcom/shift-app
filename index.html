@@ -91,7 +91,7 @@
     multipliers: {平日:1.0,金曜:1.1,土曜:1.25,日曜:1.25,祝日:1.35,祝前日:1.2},
   });
 
-  const initSubmissionRules = () => ({cycle:'monthly',deadline:20,closingDay:20,payDay:25});
+  const initSubmissionRules = () => ({cycle:'monthly',deadline:20,closingDay:20,payDay:25,wageUnit:1});
 
   // 売上ボーナス設定
   const initSalesConfig = () => ({
@@ -217,7 +217,8 @@
     return {shifts,workCount};
   };
 
-  const calcSalary = (staffId,year,month,closingDay,confirmedShifts,slotConfig,wageConfig,specialDates,salesData,salesConfig) => {
+  const calcSalary = (staffId,year,month,closingDay,wageUnit,confirmedShifts,slotConfig,wageConfig,specialDates,salesData,salesConfig) => {
+    const unit = wageUnit||1; // 分単位（1/5/15/30）
     const slots_list=[];
     for(let d=1;d<=new Date(year,month,0).getDate();d++){
       const date=new Date(year,month-1,d),ds=dateStr(date),type=getDateType(date,specialDates);
@@ -227,11 +228,14 @@
       slotConfig.forEach(sc=>{
         const sh=confirmedShifts[`${ds}_${sc.key}`];
         if(sh?.assigned?.includes(staffId)){
-          const hours=sc.endH-sc.startH;
+          const rawMinutes = Math.round((sc.endH-sc.startH)*60);
+          // 設定した分単位で切り捨て（例：15分単位なら337分→330分）
+          const paidMinutes = Math.floor(rawMinutes/unit)*unit;
+          const hours = paidMinutes/60;
           const baseWage = Math.round(base*dayMult*hours);
           const bonusWage = Math.round(base*totalMult*hours) - baseWage;
           slots_list.push({
-            date,ds,slot:sc.label,type,dayMult,hours,
+            date,ds,slot:sc.label,type,dayMult,hours,rawMinutes,paidMinutes,
             salesBonusMult:salesBonus.mult, salesTier:salesBonus.tier, salesRate:salesBonus.rate,
             totalMult, baseWage, bonusWage,
             wage:Math.round(base*totalMult*hours),
@@ -969,6 +973,7 @@
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(240px,1fr))',gap:'12px',marginBottom:'18px'}}>
         {[
           {label:'📅 提出サイクル',key:'cycle',type:'select',options:[{v:'monthly',l:'月1回'},{v:'bimonthly',l:'月2回（上旬/下旬）'},{v:'weekly',l:'週1回'}]},
+          {label:'⏱ 給与計算単位',key:'wageUnit',type:'select',options:[{v:1,l:'1分単位'},{v:5,l:'5分単位'},{v:15,l:'15分単位'},{v:30,l:'30分単位'}]},
           {label:'⏰ 提出締め切り日',key:'deadline',type:'number',unit:'日',min:1,max:31},
           {label:'💴 給与 締め日',  key:'closingDay',type:'number',unit:'日',min:1,max:31},
           {label:'💰 給与支払日',   key:'payDay',    type:'number',unit:'日',min:1,max:31},
@@ -976,7 +981,7 @@
           <div key={key} style={{backgroundColor:'#F9FAFB',borderRadius:'10px',padding:'14px',border:'1px solid #E5E7EB'}}>
             <div style={{fontSize:'12px',fontWeight:'700',color:'#374151',marginBottom:'10px'}}>{label}</div>
             {type==='select'
-              ?<select value={rules[key]} onChange={e=>onUpdate(key,e.target.value)} style={{width:'100%',padding:'8px',border:'1px solid #C4B5FD',borderRadius:'7px',fontSize:'13px'}}>{options.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}</select>
+              ?<select value={rules[key]} onChange={e=>onUpdate(key,key==='wageUnit'?parseInt(e.target.value):e.target.value)} style={{width:'100%',padding:'8px',border:'1px solid #C4B5FD',borderRadius:'7px',fontSize:'13px'}}>{options.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}</select>
               :<div style={{display:'flex',alignItems:'center',gap:'8px'}}><input type="number" min={min} max={max} value={rules[key]} onChange={e=>onUpdate(key,parseInt(e.target.value)||min)} style={{width:'76px',padding:'8px',border:'1px solid #C4B5FD',borderRadius:'7px',fontSize:'22px',fontWeight:'900',color:'#4F46E5',textAlign:'center'}}/><span style={{fontSize:'14px',color:'#6B7280'}}>{unit}</span></div>
             }
           </div>
@@ -1263,7 +1268,7 @@
   //  スタッフ：給与シミュレーション
   // ============================================================
   const StaffSalary = ({staffId,staff,confirmedShifts,slotConfig,wageConfig,specialDates,rules,salesData,salesConfig}) => {
-    const salary=useMemo(()=>calcSalary(staffId,YEAR,MONTH,rules.closingDay,confirmedShifts,slotConfig,wageConfig,specialDates,salesData,salesConfig),[staffId,confirmedShifts,wageConfig,specialDates,rules,slotConfig,salesData,salesConfig]);
+    const salary=useMemo(()=>calcSalary(staffId,YEAR,MONTH,rules.closingDay,rules.wageUnit||1,confirmedShifts,slotConfig,wageConfig,specialDates,salesData,salesConfig),[staffId,confirmedShifts,wageConfig,specialDates,rules,slotConfig,salesData,salesConfig]);
     const hasSalesBonus = salary.bonusTotal > 0;
     return (
       <div>
@@ -1272,7 +1277,7 @@
           {[
             {label:'総支給見込み',val:fmtYen(salary.total),sub:'全シフト合計',color:'#4F46E5',bg:'#EEF2FF'},
             {label:`${MONTH}月${rules.closingDay}日締め分`,val:fmtYen(salary.inPeriod),sub:'今回の給与期間',color:'#10B981',bg:'#ECFDF5'},
-            {label:'勤務回数',val:`${salary.slots_list.length}回`,sub:`合計${salary.slots_list.reduce((s,x)=>s+x.hours,0)}時間`,color:'#F59E0B',bg:'#FFFBEB'},
+            {label:'勤務回数',val:`${salary.slots_list.length}回`,sub:`合計${salary.slots_list.reduce((s,x)=>s+x.paidMinutes,0)}分`,color:'#F59E0B',bg:'#FFFBEB'},
             ...(hasSalesBonus ? [{label:'売上ボーナス',val:fmtYen(salary.bonusTotal),sub:'売上達成による加算分',color:'#10B981',bg:'#ECFDF5'}] : []),
           ].map(({label,val,sub,color,bg})=>(
             <div key={label} style={{backgroundColor:bg,borderRadius:'12px',padding:'14px',textAlign:'center'}}>
@@ -1307,7 +1312,10 @@
                         :<span style={{color:'#D1D5DB',fontSize:'11px'}}>—</span>
                       }
                     </td>
-                    <td style={{padding:'6px 10px',borderBottom:'1px solid #E5E7EB',textAlign:'center'}}>{item.hours}h</td>
+                    <td style={{padding:'6px 10px',borderBottom:'1px solid #E5E7EB',textAlign:'center'}}>
+                      <div style={{fontWeight:'700'}}>{item.paidMinutes}分</div>
+                      {item.rawMinutes!==item.paidMinutes&&<div style={{fontSize:'10px',color:'#9CA3AF',textDecoration:'line-through'}}>{item.rawMinutes}分</div>}
+                    </td>
                     <td style={{padding:'6px 10px',borderBottom:'1px solid #E5E7EB',textAlign:'right',fontWeight:'700',color:tier?'#10B981':'#4F46E5'}}>¥{item.wage.toLocaleString()}</td>
                     <td style={{padding:'6px 10px',borderBottom:'1px solid #E5E7EB',textAlign:'center'}}>{item.isInPeriod?<Tag color='#15803D' bg='#DCFCE7'>今月</Tag>:<Tag color='#92400E' bg='#FEF9C3'>翌月</Tag>}</td>
                   </tr>
