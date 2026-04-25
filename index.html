@@ -1,0 +1,1477 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ShiftSync Pro v3</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Hiragino Kaku Gothic ProN','Meiryo','Yu Gothic',sans-serif; background:#F0F2F8; min-height:100vh; color:#1F2937; }
+    input,select,button { font-family:inherit; max-width:100%; }
+    /* テキスト見切れ全体対策 */
+    td, th { word-break: break-word; }
+    .flex-child { min-width: 0; }
+    .scrollable { overflow-x:auto; }
+    ::-webkit-scrollbar { height:6px; width:6px; }
+    ::-webkit-scrollbar-track { background:#F3F4F6; }
+    ::-webkit-scrollbar-thumb { background:#C4B5FD; border-radius:3px; }
+    .overlay { position:fixed; inset:0; background:rgba(0,0,0,0.55); display:flex; align-items:center; justify-content:center; z-index:1000; padding:16px; }
+    .modal { background:white; border-radius:16px; padding:28px; width:100%; max-width:420px; box-shadow:0 20px 40px rgba(0,0,0,0.25); }
+    /* 印刷スタイル */
+    @media print {
+      body { background: white !important; }
+      .no-print { display: none !important; }
+      .print-area { position: static !important; background: transparent !important; padding: 0 !important; }
+      .print-sheet { box-shadow: none !important; border-radius: 0 !important; padding: 0 !important; max-height: none !important; overflow: visible !important; }
+      .print-sheet table { page-break-inside: auto; }
+      .print-sheet tr { page-break-inside: avoid; }
+      @page { margin: 12mm; size: A4 landscape; }
+    }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+  const { useState, useMemo } = React;
+
+  // ============================================================
+  //  定数
+  // ============================================================
+  const YEAR = 2026, MONTH = 4;
+  const DOW_JP  = ['月','火','水','木','金','土','日'];
+  const PALETTE = ['#6366F1','#8B5CF6','#10B981','#F59E0B','#EF4444','#EC4899','#06B6D4','#84CC16'];
+  const DEFAULT_PIN = '0000'; // 全員の初期PIN
+
+  const DAY_TYPE_CONF = {
+    平日:   {color:'#6B7280',bg:'#F3F4F6',ring:'#D1D5DB',icon:''},
+    金曜:   {color:'#D97706',bg:'#FEF3C7',ring:'#FCD34D',icon:'⭐'},
+    土曜:   {color:'#DC2626',bg:'#FEE2E2',ring:'#FCA5A5',icon:'🔥'},
+    日曜:   {color:'#DC2626',bg:'#FEE2E2',ring:'#FCA5A5',icon:'🔥'},
+    祝日:   {color:'#7C3AED',bg:'#EDE9FE',ring:'#C4B5FD',icon:'🎌'},
+    祝前日: {color:'#2563EB',bg:'#DBEAFE',ring:'#93C5FD',icon:'🌙'},
+  };
+
+  const INIT_STAFF = [
+    {id:1,name:'田中 太郎',  type:'employee',skillLevel:5,role:'リーダー',color:PALETTE[0]},
+    {id:2,name:'鈴木 花子',  type:'employee',skillLevel:4,role:'社員',   color:PALETTE[1]},
+    {id:3,name:'佐藤 健',    type:'parttime',skillLevel:3,role:'バイト', color:PALETTE[2]},
+    {id:4,name:'山田 美咲',  type:'parttime',skillLevel:2,role:'バイト', color:PALETTE[3]},
+    {id:5,name:'伊藤 拓也',  type:'parttime',skillLevel:2,role:'バイト', color:PALETTE[4]},
+    {id:6,name:'渡辺 さくら',type:'parttime',skillLevel:1,role:'バイト', color:PALETTE[5]},
+  ];
+
+  const INIT_SPECIAL_DATES = {'2026-04-28':'pre-holiday','2026-04-29':'holiday'};
+
+  // ============================================================
+  //  初期状態
+  // ============================================================
+  const initSlotConfig = () => ([
+    {key:'morning',   label:'朝番', startH:9,  endH:13},
+    {key:'afternoon', label:'昼番', startH:13, endH:17},
+    {key:'evening',   label:'夜番', startH:17, endH:21},
+  ]);
+
+  const initStoreSettings = () => {
+    const s = {};
+    DOW_JP.forEach((d,di) => {
+      s[d] = {
+        morning:   {required:di>=5?3:2, minSkill:2},
+        afternoon: {required:di>=5?3:2, minSkill:2},
+        evening:   {required:di>=5?3:2, minSkill:3},
+      };
+    });
+    return s;
+  };
+
+  const initWageConfig = () => ({
+    baseWages: {1:1200,2:1100,3:1050,4:980,5:980,6:950},
+    multipliers: {平日:1.0,金曜:1.1,土曜:1.25,日曜:1.25,祝日:1.35,祝前日:1.2},
+  });
+
+  const initSubmissionRules = () => ({cycle:'monthly',deadline:20,closingDay:20,payDay:25});
+
+  // 売上ボーナス設定
+  const initSalesConfig = () => ({
+    enabled: true,
+    // 目標達成率ごとのボーナス倍率（重ねがけはせず最高ティアを適用）
+    tiers: [
+      {id:1, minRate:100, label:'🎯 目標達成',    bonusRate:10, color:'#10B981', bg:'#ECFDF5', ring:'#6EE7B7'},
+      {id:2, minRate:120, label:'🚀 超過達成',    bonusRate:20, color:'#6366F1', bg:'#EEF2FF', ring:'#A5B4FC'},
+      {id:3, minRate:150, label:'👑 大幅超過達成', bonusRate:35, color:'#F59E0B', bg:'#FFFBEB', ring:'#FCD34D'},
+    ],
+  });
+
+  // 日別売上データ（targets: 目標, results: 実績）
+  const initSalesData = () => {
+    // デモ用：いくつかサンプルデータを入れておく
+    const targets={}, results={};
+    const lastD = new Date(YEAR,MONTH,0).getDate();
+    for(let d=1;d<=lastD;d++){
+      const ds=`${YEAR}-${String(MONTH).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const date=new Date(YEAR,MONTH-1,d), dow=date.getDay();
+      // 曜日別目標：土日祝は高め
+      targets[ds] = dow===6||dow===0 ? 300000 : dow===5 ? 250000 : 180000;
+      // 実績はデモ用にランダムっぽく
+      const rand = [0.85,0.95,1.05,1.12,1.25,1.45,0.78,1.02,0.92,1.18][d%10];
+      if(d<=20) results[ds] = Math.round(targets[ds] * rand / 1000) * 1000;
+    }
+    return {targets, results};
+  };
+
+  // 全員の初期PINは DEFAULT_PIN、管理者だけ設定済み扱い（デモ用）
+  const initPins       = () => { const p={admin:DEFAULT_PIN}; INIT_STAFF.forEach(s=>{p[s.id]=DEFAULT_PIN;}); return p; };
+  const initPinChanged = () => { const c={admin:true}; INIT_STAFF.forEach(s=>{c[s.id]=false;}); return c; };
+
+  const initAvailability = () => {
+    const avail = {};
+    INIT_STAFF.forEach(s => { avail[s.id] = {}; });
+    const lastD = new Date(YEAR,MONTH,0).getDate();
+    for (let d=1; d<=lastD; d++) {
+      const date=new Date(YEAR,MONTH-1,d), dow=date.getDay();
+      const ds=`${YEAR}-${String(MONTH).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      if([1,2,4,5].includes(dow)) avail[1][ds]=[{from:'09:00',to:'17:00'}];
+      if(dow===6)                  avail[1][ds]=[{from:'09:00',to:'21:00'}];
+      if([2,3,5,6,0].includes(dow)) avail[2][ds]=[{from:'13:00',to:'21:00'}];
+      if([6,0].includes(dow))       avail[2][ds]=[{from:'09:00',to:'21:00'}];
+      if([1,3,5].includes(dow)) avail[3][ds]=[{from:'09:00',to:'13:00'}];
+      if(dow===6)               avail[3][ds]=[{from:'09:00',to:'17:00'}];
+      if([2,4].includes(dow))   avail[4][ds]=[{from:'17:00',to:'22:00'}];
+      if([6,0].includes(dow))   avail[4][ds]=[{from:'13:00',to:'21:00'}];
+      if([1,3,5].includes(dow)) avail[5][ds]=[{from:'17:00',to:'22:00'}];
+      if([6,0].includes(dow))   avail[5][ds]=[{from:'13:00',to:'21:00'}];
+      if([2,4].includes(dow))   avail[6][ds]=[{from:'09:00',to:'17:00'}];
+      if([6,0].includes(dow))   avail[6][ds]=[{from:'15:00',to:'22:00'}];
+    }
+    return avail;
+  };
+
+  // ============================================================
+  //  ヘルパー
+  // ============================================================
+  const dateStr = date => {
+    if(!date) return '';
+    return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+  };
+  const getDaysInMonth = (y,m) => {
+    const result=[]; const firstDay=new Date(y,m-1,1); let dow=firstDay.getDay(); dow=dow===0?6:dow-1;
+    for(let i=0;i<dow;i++) result.push(null);
+    const lastD=new Date(y,m,0).getDate(); for(let d=1;d<=lastD;d++) result.push(new Date(y,m-1,d));
+    return result;
+  };
+  const getDateType = (date,specialDates) => {
+    const ds=dateStr(date);
+    if(specialDates[ds]==='holiday')     return '祝日';
+    if(specialDates[ds]==='pre-holiday') return '祝前日';
+    const dow=date.getDay();
+    if(dow===6) return '土曜'; if(dow===0) return '日曜'; if(dow===5) return '金曜'; return '平日';
+  };
+  const getDateDowJP = date => ['日','月','火','水','木','金','土'][date.getDay()];
+  const fmtYen = n => '¥'+Math.round(n).toLocaleString();
+  const parseTimeStr = str => { if(!str) return 0; const [h,m]=str.split(':').map(Number); return h*60+(m||0); };
+  const staffCoversSlot = (entries,startH,endH) => {
+    if(!entries||!entries.length) return false;
+    const sS=startH*60,sE=endH*60;
+    return entries.some(e=>{ const eS=parseTimeStr(e.from),eE=parseTimeStr(e.to); return Math.min(eE,sE)-Math.max(eS,sS)>=60; });
+  };
+
+  // 売上達成率からボーナス情報を返す
+  const getSalesBonus = (ds, salesData, salesConfig) => {
+    if (!salesConfig.enabled) return {mult:1.0, tier:null, rate:null};
+    const target = salesData.targets[ds];
+    const result = salesData.results[ds];
+    if (!target || result == null) return {mult:1.0, tier:null, rate:null};
+    const rate = Math.round((result / target) * 100);
+    const achieved = salesConfig.tiers.filter(t=>rate>=t.minRate).sort((a,b)=>b.minRate-a.minRate);
+    if (!achieved.length) return {mult:1.0, tier:null, rate};
+    const top = achieved[0];
+    return {mult: 1.0 + top.bonusRate/100, tier: top, rate};
+  };
+
+  const fmtMan = n => n>=10000 ? `${(n/10000).toFixed(1)}万` : `${(n/1000).toFixed(0)}千`;
+  // 小数時間（例: 9.5）→ "09:30" に変換
+  const decToTimeStr = h => `${Math.floor(h).toString().padStart(2,'0')}:${Math.round((h%1)*60).toString().padStart(2,'0')}`;
+
+  // ============================================================
+  //  自動生成 / 給与計算
+  // ============================================================
+  const generateMonthlyShifts = (year,month,slotConfig,storeSettings,availability,staff) => {
+    const shifts={},workCount={};
+    staff.forEach(s=>{workCount[s.id]=0;});
+    const lastD=new Date(year,month,0).getDate();
+    for(let d=1;d<=lastD;d++){
+      const date=new Date(year,month-1,d),ds=dateStr(date),dowJP=getDateDowJP(date);
+      slotConfig.forEach(sc=>{
+        const key=`${ds}_${sc.key}`,setting=storeSettings[dowJP]?.[sc.key]; if(!setting) return;
+        const {required,minSkill}=setting;
+        const available=staff.filter(s=>staffCoversSlot(availability[s.id]?.[ds],sc.startH,sc.endH));
+        const qualified=available.filter(s=>s.skillLevel>=minSkill).sort((a,b)=>workCount[a.id]-workCount[b.id]);
+        const others=available.filter(s=>s.skillLevel<minSkill).sort((a,b)=>workCount[a.id]-workCount[b.id]);
+        const assigned=[];
+        for(const c of [...qualified,...others]){ if(assigned.length>=required) break; assigned.push(c.id); workCount[c.id]++; }
+        shifts[key]={assigned,required,minSkill,isFull:assigned.length>=required,shortfall:Math.max(0,required-assigned.length)};
+      });
+    }
+    return {shifts,workCount};
+  };
+
+  const calcSalary = (staffId,year,month,closingDay,confirmedShifts,slotConfig,wageConfig,specialDates,salesData,salesConfig) => {
+    const slots_list=[];
+    for(let d=1;d<=new Date(year,month,0).getDate();d++){
+      const date=new Date(year,month-1,d),ds=dateStr(date),type=getDateType(date,specialDates);
+      const dayMult=wageConfig.multipliers[type]??1.0, base=wageConfig.baseWages[staffId]??1000;
+      const salesBonus = salesData&&salesConfig ? getSalesBonus(ds,salesData,salesConfig) : {mult:1.0,tier:null,rate:null};
+      const totalMult = dayMult * salesBonus.mult;
+      slotConfig.forEach(sc=>{
+        const sh=confirmedShifts[`${ds}_${sc.key}`];
+        if(sh?.assigned?.includes(staffId)){
+          const hours=sc.endH-sc.startH;
+          const baseWage = Math.round(base*dayMult*hours);
+          const bonusWage = Math.round(base*totalMult*hours) - baseWage;
+          slots_list.push({
+            date,ds,slot:sc.label,type,dayMult,hours,
+            salesBonusMult:salesBonus.mult, salesTier:salesBonus.tier, salesRate:salesBonus.rate,
+            totalMult, baseWage, bonusWage,
+            wage:Math.round(base*totalMult*hours),
+            isInPeriod:d<=closingDay,
+          });
+        }
+      });
+    }
+    const total=slots_list.reduce((s,x)=>s+x.wage,0);
+    const inPeriod=slots_list.filter(x=>x.isInPeriod).reduce((s,x)=>s+x.wage,0);
+    const bonusTotal=slots_list.reduce((s,x)=>s+x.bonusWage,0);
+    return {total,inPeriod,bonusTotal,slots_list};
+  };
+
+  // ============================================================
+  //  共通 UI 部品
+  // ============================================================
+  const SkillStars=({level})=><span>{Array.from({length:5},(_,i)=><span key={i} style={{color:i<level?'#F59E0B':'#E5E7EB',fontSize:'12px'}}>★</span>)}</span>;
+  const Tag=({children,color,bg})=><span style={{display:'inline-block',padding:'2px 8px',borderRadius:'9999px',fontSize:'11px',fontWeight:'700',color,backgroundColor:bg,whiteSpace:'nowrap'}}>{children}</span>;
+  const Card=({children,style={}})=><div style={{backgroundColor:'white',borderRadius:'12px',padding:'20px',boxShadow:'0 1px 4px rgba(0,0,0,0.08)',...style}}>{children}</div>;
+  const SectionTitle=({children})=><h2 style={{fontSize:'16px',fontWeight:'800',marginBottom:'16px',color:'#1E1B4B'}}>{children}</h2>;
+  const DayTypeBadge=({type})=>{const c=DAY_TYPE_CONF[type];if(!c||type==='平日')return null;return<span style={{display:'inline-block',padding:'1px 4px',borderRadius:'9999px',fontSize:'8px',fontWeight:'700',color:c.color,backgroundColor:c.bg,border:`1px solid ${c.ring}`}}>{c.icon}{type}</span>;};
+
+  // ============================================================
+  //  月カレンダー
+  // ============================================================
+  const MonthCalendar = ({year,month,specialDates,renderDay,onClickDate}) => {
+    const days=getDaysInMonth(year,month);
+    return (
+      <div>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:'2px',marginBottom:'4px'}}>
+          {['月','火','水','木','金','土','日'].map((d,i)=>(
+            <div key={d} style={{textAlign:'center',fontSize:'12px',fontWeight:'700',padding:'5px 0',color:i>=5?'#EF4444':i===4?'#D97706':'#374151'}}>{d}</div>
+          ))}
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:'3px'}}>
+          {days.map((date,idx)=>{
+            if(!date) return <div key={`e${idx}`} style={{minHeight:'80px'}}/>;
+            const type=getDateType(date,specialDates),c=DAY_TYPE_CONF[type],isWknd=['土曜','日曜'].includes(type);
+            return (
+              <div key={dateStr(date)} onClick={()=>onClickDate&&onClickDate(date)}
+                style={{minHeight:'80px',padding:'4px',borderRadius:'8px',cursor:onClickDate?'pointer':'default',
+                  backgroundColor:type==='祝日'?'#F5F3FF':type==='祝前日'?'#EFF6FF':isWknd?'#FFF5F5':'white',
+                  border:`1px solid ${c.ring}`}}>
+                <div style={{display:'flex',alignItems:'center',gap:'3px',marginBottom:'3px'}}>
+                  <span style={{fontSize:'13px',fontWeight:'700',color:isWknd||type==='祝日'?'#EF4444':type==='金曜'?'#D97706':'#1F2937'}}>{date.getDate()}</span>
+                  {type!=='平日'&&<DayTypeBadge type={type}/>}
+                </div>
+                {renderDay&&renderDay(date)}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  時間入力モーダル
+  // ============================================================
+  const TimeEntryModal = ({date,entries,onSave,onClose}) => {
+    const [local,setLocal]=useState(entries?JSON.parse(JSON.stringify(entries)):[]);
+    const add=()=>setLocal(p=>[...p,{from:'09:00',to:'17:00'}]);
+    const remove=i=>setLocal(p=>p.filter((_,idx)=>idx!==i));
+    const upd=(i,f,v)=>setLocal(p=>p.map((e,idx)=>idx===i?{...e,[f]:v}:e));
+    const calcH=e=>{const d=parseTimeStr(e.to)-parseTimeStr(e.from);return d>0?`${Math.floor(d/60)}h${d%60?`${d%60}m`:''}`:null;};
+    const isValid=local.every(e=>parseTimeStr(e.to)>parseTimeStr(e.from));
+    const dow=['日','月','火','水','木','金','土'][date.getDay()];
+    const dowColor=date.getDay()===6||date.getDay()===0?'#EF4444':date.getDay()===5?'#D97706':'#374151';
+    return (
+      <div className="overlay" onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+        <div className="modal">
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:'16px'}}>
+            <div>
+              <div style={{fontSize:'18px',fontWeight:'900',color:'#1E1B4B'}}>{date.getMonth()+1}月{date.getDate()}日<span style={{color:dowColor,marginLeft:'6px'}}>（{dow}）</span></div>
+              <div style={{fontSize:'12px',color:'#6B7280',marginTop:'2px'}}>入れる時間帯を入力（複数可）</div>
+            </div>
+            <button onClick={onClose} style={{padding:'4px 9px',backgroundColor:'#F3F4F6',border:'none',borderRadius:'7px',cursor:'pointer',fontSize:'16px',color:'#6B7280'}}>✕</button>
+          </div>
+          {local.length===0&&<div style={{textAlign:'center',padding:'18px',color:'#9CA3AF',fontSize:'13px',backgroundColor:'#F9FAFB',borderRadius:'10px',marginBottom:'12px',border:'1px dashed #E5E7EB'}}>この日は入れません</div>}
+          <div style={{marginBottom:'12px'}}>
+            {local.map((e,i)=>{
+              const h=calcH(e),valid=parseTimeStr(e.to)>parseTimeStr(e.from);
+              return (
+                <div key={i} style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'8px',padding:'10px 12px',backgroundColor:valid?'#F0F4FF':'#FFF1F2',borderRadius:'10px',border:`1px solid ${valid?'#C7D2FE':'#FECDD3'}`,flexWrap:'wrap'}}>
+                  <span style={{fontSize:'10px',color:'#9CA3AF',minWidth:'18px'}}>#{i+1}</span>
+                  <input type="time" value={e.from} onChange={ev=>upd(i,'from',ev.target.value)}
+                    style={{padding:'5px 7px',border:`1px solid ${valid?'#A5B4FC':'#FCA5A5'}`,borderRadius:'7px',fontSize:'15px',fontWeight:'800',color:'#4F46E5',width:'110px'}}/>
+                  <span style={{color:'#6B7280',fontWeight:'700'}}>〜</span>
+                  <input type="time" value={e.to} onChange={ev=>upd(i,'to',ev.target.value)}
+                    style={{padding:'5px 7px',border:`1px solid ${valid?'#A5B4FC':'#FCA5A5'}`,borderRadius:'7px',fontSize:'15px',fontWeight:'800',color:'#4F46E5',width:'110px'}}/>
+                  {valid&&h&&<span style={{fontSize:'11px',color:'#10B981',fontWeight:'700',backgroundColor:'#ECFDF5',padding:'2px 7px',borderRadius:'12px'}}>{h}</span>}
+                  {!valid&&<span style={{fontSize:'10px',color:'#EF4444'}}>⚠ 終了を開始より後に</span>}
+                  <button onClick={()=>remove(i)} style={{marginLeft:'auto',padding:'3px 8px',backgroundColor:'#FEE2E2',color:'#DC2626',border:'none',borderRadius:'5px',cursor:'pointer',fontSize:'12px',fontWeight:'700'}}>削除</button>
+                </div>
+              );
+            })}
+          </div>
+          <button onClick={add} style={{width:'100%',padding:'9px',backgroundColor:'#EEF2FF',color:'#4F46E5',border:'2px dashed #A5B4FC',borderRadius:'9px',cursor:'pointer',fontSize:'13px',fontWeight:'700',marginBottom:'14px'}}>＋ 時間帯を追加</button>
+          <div style={{display:'flex',gap:'8px'}}>
+            <button onClick={onClose} style={{flex:1,padding:'10px',backgroundColor:'#F3F4F6',color:'#374151',border:'none',borderRadius:'8px',cursor:'pointer',fontSize:'13px',fontWeight:'600'}}>キャンセル</button>
+            <button onClick={()=>{if(isValid)onSave(local);else alert('終了時刻は開始時刻より後にしてください');}}
+              style={{flex:2,padding:'10px',backgroundColor:isValid?'#4F46E5':'#9CA3AF',color:'white',border:'none',borderRadius:'8px',cursor:isValid?'pointer':'not-allowed',fontSize:'13px',fontWeight:'800'}}>✅ 保存する</button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  PINパッド UI（タップ入力）
+  // ============================================================
+  const PinDots = ({value}) => (
+    <div style={{display:'flex',gap:'12px',justifyContent:'center',margin:'10px 0'}}>
+      {Array.from({length:4},(_,i)=>(
+        <div key={i} style={{width:'16px',height:'16px',borderRadius:'50%',backgroundColor:i<value.length?'#4F46E5':'#E5E7EB',transition:'background-color 0.15s,transform 0.1s',transform:i<value.length?'scale(1.2)':'scale(1)'}}/>
+      ))}
+    </div>
+  );
+
+  const PinPad = ({value,onChange,onConfirm,accentColor='#4F46E5'}) => {
+    const keys=['1','2','3','4','5','6','7','8','9','','0','⌫'];
+    const tap=k=>{
+      if(k==='⌫'){onChange(value.slice(0,-1));return;}
+      if(k===''||value.length>=4) return;
+      onChange(value+k);
+    };
+    return (
+      <div>
+        <PinDots value={value}/>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'10px',margin:'14px 0'}}>
+          {keys.map((k,i)=>(
+            <button key={i} onClick={()=>tap(k)} disabled={k===''}
+              style={{padding:'15px 0',fontSize:'22px',fontWeight:'700',
+                backgroundColor:k===''?'transparent':k==='⌫'?'#FEE2E2':'#F3F4F6',
+                color:k==='⌫'?'#DC2626':'#1F2937',
+                border:'none',borderRadius:'12px',cursor:k===''?'default':'pointer',opacity:k===''?0:1}}>
+              {k}
+            </button>
+          ))}
+        </div>
+        {onConfirm&&(
+          <button onClick={onConfirm} disabled={value.length<4}
+            style={{width:'100%',padding:'14px',backgroundColor:value.length===4?accentColor:'#E5E7EB',
+              color:value.length===4?'white':'#9CA3AF',border:'none',borderRadius:'12px',
+              cursor:value.length===4?'pointer':'not-allowed',fontSize:'16px',fontWeight:'800',transition:'all 0.2s'}}>
+            確認 →
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  ログイン画面
+  // ============================================================
+  const LoginScreen = ({staff,pins,onLogin}) => {
+    const [selected,setSelected]=useState('admin');
+    const [pin,setPin]=useState('');
+    const [error,setError]=useState('');
+
+    const attempt = val => {
+      const key=selected==='admin'?'admin':parseInt(selected);
+      if(val===pins[key]){ onLogin(selected==='admin'?{role:'admin'}:{role:'staff',staffId:key}); return; }
+      setTimeout(()=>{ setError('PINが正しくありません'); setPin(''); },300);
+    };
+    const handlePinChange = val => {
+      setPin(val); setError('');
+      if(val.length===4) attempt(val);
+    };
+
+    return (
+      <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:'linear-gradient(135deg,#1E1B4B 0%,#4F46E5 60%,#7C3AED 100%)',padding:'16px'}}>
+        <div style={{backgroundColor:'white',borderRadius:'20px',padding:'32px 28px',width:'100%',maxWidth:'320px',boxShadow:'0 20px 60px rgba(0,0,0,0.3)'}}>
+          <div style={{textAlign:'center',marginBottom:'22px'}}>
+            <div style={{fontSize:'38px',marginBottom:'6px'}}>📅</div>
+            <div style={{fontSize:'22px',fontWeight:'900',color:'#1E1B4B'}}>ShiftSync Pro</div>
+            <div style={{fontSize:'12px',color:'#6B7280',marginTop:'3px'}}>シフト管理システム</div>
+          </div>
+          <div style={{marginBottom:'16px'}}>
+            <div style={{fontSize:'12px',fontWeight:'700',color:'#374151',marginBottom:'6px'}}>👤 ログインするユーザー</div>
+            <select value={selected} onChange={e=>{setSelected(e.target.value);setPin('');setError('');}}
+              style={{width:'100%',padding:'10px 12px',border:'2px solid #E5E7EB',borderRadius:'10px',fontSize:'14px',color:'#1F2937'}}>
+              <option value="admin">🔑 管理者（オーナー）</option>
+              {staff.map(s=><option key={s.id} value={s.id}>👤 {s.name}（{s.role}）</option>)}
+            </select>
+          </div>
+          <div style={{fontSize:'12px',fontWeight:'700',color:'#374151',marginBottom:'4px'}}>🔒 PIN（4桁）</div>
+          <PinPad value={pin} onChange={handlePinChange}/>
+          {error&&<div style={{color:'#DC2626',fontSize:'12px',marginTop:'8px',textAlign:'center',fontWeight:'700',backgroundColor:'#FEF2F2',padding:'8px',borderRadius:'7px'}}>⚠ {error}</div>}
+          <div style={{marginTop:'16px',backgroundColor:'#F9FAFB',borderRadius:'10px',padding:'10px 12px',border:'1px solid #E5E7EB'}}>
+            <div style={{fontSize:'10px',color:'#9CA3AF',fontWeight:'700',marginBottom:'3px'}}>ℹ️ 初回ログインについて</div>
+            <div style={{fontSize:'11px',color:'#6B7280',lineHeight:'1.7'}}>
+              全員の初期PINは <strong style={{color:'#4F46E5',letterSpacing:'3px'}}>0000</strong> です。<br/>
+              初回ログイン後に自分のPINを設定します。
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  初回PIN設定画面（初回ログイン後に強制表示）
+  // ============================================================
+  const PinSetupScreen = ({user,staff,onComplete}) => {
+    const [step,setStep]=useState(1);
+    const [newPin,setNewPin]=useState('');
+    const [confPin,setConfPin]=useState('');
+    const [error,setError]=useState('');
+    const me=user.role==='staff'?staff.find(s=>s.id===user.staffId):null;
+    const accent=me?.color||'#4F46E5';
+
+    const handleNew=val=>{setNewPin(val);setError('');if(val.length===4)setTimeout(()=>setStep(2),300);};
+    const handleConf=val=>{
+      setConfPin(val);setError('');
+      if(val.length===4){
+        if(val===newPin){setTimeout(()=>onComplete(val),200);}
+        else{setTimeout(()=>{setError('PINが一致しません。最初からやり直してください。');setStep(1);setNewPin('');setConfPin('');},300);}
+      }
+    };
+
+    return (
+      <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:`linear-gradient(135deg,${accent}CC,${accent})`,padding:'16px'}}>
+        <div style={{backgroundColor:'white',borderRadius:'20px',padding:'32px 28px',width:'100%',maxWidth:'320px',boxShadow:'0 20px 60px rgba(0,0,0,0.3)'}}>
+          {/* ステップインジケーター */}
+          <div style={{display:'flex',justifyContent:'center',alignItems:'center',gap:'6px',marginBottom:'22px'}}>
+            {[1,2].map(s=>(
+              <React.Fragment key={s}>
+                <div style={{width:'28px',height:'28px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',backgroundColor:step>=s?accent:'#E5E7EB',color:step>=s?'white':'#9CA3AF',fontSize:'13px',fontWeight:'900',transition:'all 0.25s'}}>{s}</div>
+                {s<2&&<div style={{width:'32px',height:'3px',borderRadius:'2px',backgroundColor:step>1?accent:'#E5E7EB',transition:'all 0.25s'}}/>}
+              </React.Fragment>
+            ))}
+          </div>
+
+          {me&&(
+            <div style={{display:'flex',alignItems:'center',gap:'10px',marginBottom:'18px',padding:'10px 12px',backgroundColor:'#F9FAFB',borderRadius:'10px'}}>
+              <div style={{width:'32px',height:'32px',borderRadius:'50%',backgroundColor:accent,display:'flex',alignItems:'center',justifyContent:'center',color:'white',fontWeight:'900',fontSize:'14px',flexShrink:0}}>{me.name[0]}</div>
+              <div>
+                <div style={{fontWeight:'700',fontSize:'14px',color:'#1E1B4B'}}>{me.name}</div>
+                <div style={{fontSize:'11px',color:'#6B7280'}}>はじめてのログイン 🎉</div>
+              </div>
+            </div>
+          )}
+
+          <div style={{textAlign:'center',marginBottom:'8px'}}>
+            {step===1&&<><div style={{fontSize:'16px',fontWeight:'900',color:'#1E1B4B'}}>🔐 新しいPINを設定</div><div style={{fontSize:'12px',color:'#6B7280',marginTop:'4px'}}>4桁の数字を自分で決めてください</div></>}
+            {step===2&&<><div style={{fontSize:'16px',fontWeight:'900',color:'#1E1B4B'}}>🔄 もう一度入力</div><div style={{fontSize:'12px',color:'#6B7280',marginTop:'4px'}}>確認のためもう一度入力してください</div></>}
+          </div>
+
+          {step===1&&<PinPad value={newPin}  onChange={handleNew}  accentColor={accent}/>}
+          {step===2&&<PinPad value={confPin} onChange={handleConf} accentColor={accent}/>}
+
+          {error&&<div style={{color:'#DC2626',fontSize:'12px',marginTop:'8px',textAlign:'center',fontWeight:'700',backgroundColor:'#FEF2F2',padding:'8px',borderRadius:'7px'}}>⚠ {error}</div>}
+          <div style={{marginTop:'12px',textAlign:'center',fontSize:'11px',color:'#9CA3AF'}}>設定後は次回から新しいPINでログイン</div>
+        </div>
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  PIN変更モーダル（ログイン中）
+  // ============================================================
+  const PinChangeModal = ({userId,pins,accentColor,onSave,onClose}) => {
+    const [step,setStep]=useState(1);
+    const [cur,setCur]=useState('');
+    const [newP,setNewP]=useState('');
+    const [conf,setConf]=useState('');
+    const [error,setError]=useState('');
+    const ac=accentColor||'#4F46E5';
+
+    const handleCur=val=>{setCur(val);setError('');
+      if(val.length===4){if(val===pins[userId])setTimeout(()=>setStep(2),300);else setTimeout(()=>{setError('現在のPINが正しくありません');setCur('');},300);}};
+    const handleNew=val=>{setNewP(val);setError('');if(val.length===4)setTimeout(()=>setStep(3),300);};
+    const handleConf=val=>{setConf(val);setError('');
+      if(val.length===4){if(val===newP)setTimeout(()=>onSave(val),200);else setTimeout(()=>{setError('PINが一致しません。新しいPINから入力し直してください。');setStep(2);setNewP('');setConf('');},300);}};
+
+    const labels=['現在のPINを入力','新しいPINを設定','もう一度確認'];
+
+    return (
+      <div className="overlay" onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+        <div className="modal" style={{maxWidth:'320px'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'16px'}}>
+            <div style={{fontSize:'16px',fontWeight:'900',color:'#1E1B4B'}}>🔑 PIN変更</div>
+            <button onClick={onClose} style={{padding:'4px 9px',backgroundColor:'#F3F4F6',border:'none',borderRadius:'7px',cursor:'pointer',color:'#6B7280',fontSize:'15px'}}>✕</button>
+          </div>
+          {/* ステップバー */}
+          <div style={{display:'flex',justifyContent:'center',alignItems:'center',gap:'5px',marginBottom:'16px'}}>
+            {[1,2,3].map(s=>(
+              <React.Fragment key={s}>
+                <div style={{width:'24px',height:'24px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',backgroundColor:step>=s?ac:'#E5E7EB',color:step>=s?'white':'#9CA3AF',fontSize:'11px',fontWeight:'900',transition:'all 0.2s'}}>{s}</div>
+                {s<3&&<div style={{width:'22px',height:'3px',borderRadius:'2px',backgroundColor:step>s?ac:'#E5E7EB',transition:'all 0.2s'}}/>}
+              </React.Fragment>
+            ))}
+          </div>
+          <div style={{textAlign:'center',fontSize:'13px',fontWeight:'700',color:'#374151',marginBottom:'6px'}}>{labels[step-1]}</div>
+          {step===1&&<PinPad value={cur}  onChange={handleCur}  accentColor={ac}/>}
+          {step===2&&<PinPad value={newP} onChange={handleNew}  accentColor={ac}/>}
+          {step===3&&<PinPad value={conf} onChange={handleConf} accentColor={ac}/>}
+          {error&&<div style={{color:'#DC2626',fontSize:'12px',marginTop:'8px',textAlign:'center',fontWeight:'700',backgroundColor:'#FEF2F2',padding:'8px',borderRadius:'7px'}}>⚠ {error}</div>}
+        </div>
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  印刷モーダル
+  // ============================================================
+  const PrintModal = ({confirmedShifts, slotConfig, staff, specialDates, onClose}) => {
+    const [view, setView] = useState('day'); // 'day' | 'name'
+
+    const lastD = new Date(YEAR, MONTH, 0).getDate();
+    const allDates = Array.from({length:lastD}, (_,i) => new Date(YEAR, MONTH-1, i+1));
+
+    // 日別データ構築
+    const byDay = allDates.map(date => {
+      const ds = dateStr(date);
+      const type = getDateType(date, specialDates);
+      const slots = slotConfig.map(sc => {
+        const sh = confirmedShifts[`${ds}_${sc.key}`];
+        const assigned = sh?.assigned?.map(id => staff.find(s=>s.id===id)).filter(Boolean) || [];
+        return { sc, assigned, shortfall: sh?.shortfall || 0 };
+      });
+      const hasAny = slots.some(s => s.assigned.length > 0);
+      return { date, ds, type, slots, hasAny };
+    }).filter(d => d.hasAny);
+
+    // 名前別データ構築
+    const byName = staff.map(s => {
+      const shifts = [];
+      allDates.forEach(date => {
+        const ds = dateStr(date);
+        const type = getDateType(date, specialDates);
+        const workedSlots = slotConfig.filter(sc => confirmedShifts[`${ds}_${sc.key}`]?.assigned?.includes(s.id));
+        if (workedSlots.length > 0) shifts.push({ date, ds, type, slots: workedSlots });
+      });
+      return { s, shifts };
+    }).filter(x => x.shifts.length > 0);
+
+    const DOW_SHORT = ['日','月','火','水','木','金','土'];
+    const typeColor = t => t==='平日'?'#374151':t==='金曜'?'#D97706':t==='土曜'||t==='日曜'?'#DC2626':t==='祝日'?'#7C3AED':'#2563EB';
+    const typeBg    = t => t==='平日'?'white':t==='金曜'?'#FFFBEB':t==='土曜'||t==='日曜'?'#FFF5F5':t==='祝日'?'#F5F3FF':'#EFF6FF';
+
+    return (
+      <div className="print-area" style={{position:'fixed',inset:0,backgroundColor:'rgba(0,0,0,0.6)',zIndex:2000,display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'20px',overflowY:'auto'}}>
+        {/* 印刷時は以下のコントロールバーを非表示 */}
+        <div className="no-print" style={{position:'fixed',top:'20px',left:'50%',transform:'translateX(-50%)',backgroundColor:'white',borderRadius:'12px',padding:'10px 16px',boxShadow:'0 4px 20px rgba(0,0,0,0.25)',display:'flex',gap:'10px',alignItems:'center',zIndex:2100,whiteSpace:'nowrap'}}>
+          <span style={{fontSize:'13px',fontWeight:'700',color:'#374151'}}>📄 印刷プレビュー</span>
+          <div style={{display:'flex',gap:'4px'}}>
+            <button onClick={()=>setView('day')}  style={{padding:'6px 12px',backgroundColor:view==='day'?'#4F46E5':'#F3F4F6',color:view==='day'?'white':'#374151',border:'none',borderRadius:'7px',cursor:'pointer',fontSize:'12px',fontWeight:'700'}}>📅 日別</button>
+            <button onClick={()=>setView('name')} style={{padding:'6px 12px',backgroundColor:view==='name'?'#4F46E5':'#F3F4F6',color:view==='name'?'white':'#374151',border:'none',borderRadius:'7px',cursor:'pointer',fontSize:'12px',fontWeight:'700'}}>👤 名前別</button>
+          </div>
+          <button onClick={()=>window.print()} style={{padding:'7px 16px',backgroundColor:'#10B981',color:'white',border:'none',borderRadius:'8px',cursor:'pointer',fontSize:'13px',fontWeight:'800'}}>🖨 印刷する</button>
+          <button onClick={onClose} style={{padding:'7px 12px',backgroundColor:'#FEE2E2',color:'#DC2626',border:'none',borderRadius:'8px',cursor:'pointer',fontSize:'13px',fontWeight:'700'}}>✕ 閉じる</button>
+        </div>
+
+        {/* 印刷コンテンツ本体 */}
+        <div className="print-sheet" style={{backgroundColor:'white',borderRadius:'12px',padding:'28px 24px',width:'100%',maxWidth:'960px',marginTop:'64px',boxShadow:'0 8px 32px rgba(0,0,0,0.15)',maxHeight:'calc(100vh - 100px)',overflowY:'auto'}}>
+
+          {/* ヘッダー */}
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',marginBottom:'20px',paddingBottom:'12px',borderBottom:'3px solid #1E1B4B'}}>
+            <div>
+              <div style={{fontSize:'22px',fontWeight:'900',color:'#1E1B4B'}}>📅 ShiftSync Pro</div>
+              <div style={{fontSize:'14px',color:'#6B7280',marginTop:'2px'}}>{YEAR}年{MONTH}月 シフト表</div>
+            </div>
+            <div style={{textAlign:'right',fontSize:'12px',color:'#9CA3AF'}}>
+              <div>出力日：{new Date().toLocaleDateString('ja-JP')}</div>
+              <div className="no-print">{view==='day'?'日別表示':'名前別表示'}</div>
+            </div>
+          </div>
+
+          {/* ===== 日別表示 ===== */}
+          {view==='day'&&(
+            <div>
+              <div style={{fontSize:'14px',fontWeight:'800',color:'#1E1B4B',marginBottom:'12px'}}>📆 日別シフト表</div>
+              <table style={{width:'100%',borderCollapse:'collapse',fontSize:'12px'}}>
+                <thead>
+                  <tr style={{backgroundColor:'#1E1B4B'}}>
+                    <th style={{padding:'8px 10px',color:'white',textAlign:'center',fontWeight:'700',width:'52px',borderRight:'1px solid #3730A3'}}>日付</th>
+                    <th style={{padding:'8px 10px',color:'white',textAlign:'center',fontWeight:'700',width:'36px',borderRight:'1px solid #3730A3'}}>曜</th>
+                    <th style={{padding:'8px 10px',color:'white',textAlign:'center',fontWeight:'700',width:'52px',borderRight:'1px solid #3730A3'}}>種別</th>
+                    {slotConfig.map(sc=>(
+                      <th key={sc.key} style={{padding:'8px 10px',color:'white',textAlign:'center',fontWeight:'700',borderRight:'1px solid #3730A3'}}>
+                        <div>{sc.label}</div>
+                        <div style={{fontSize:'10px',color:'#C4B5FD',fontWeight:'500'}}>{decToTimeStr(sc.startH)}〜{decToTimeStr(sc.endH)}</div>
+                      </th>
+                    ))}
+                    <th style={{padding:'8px 10px',color:'#C4B5FD',textAlign:'center',fontWeight:'700',width:'60px'}}>人数計</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {byDay.map(({date,ds,type,slots},ri)=>{
+                    const totalStaff = slots.reduce((s,x)=>s+x.assigned.length,0);
+                    const totalShortfall = slots.reduce((s,x)=>s+x.shortfall,0);
+                    return (
+                      <tr key={ds} style={{backgroundColor:ri%2===0?typeBg(type):'white'}}>
+                        <td style={{padding:'7px 10px',fontWeight:'700',textAlign:'center',color:typeColor(type),borderBottom:'1px solid #E5E7EB',borderRight:'1px solid #E5E7EB',fontSize:'14px'}}>{date.getDate()}</td>
+                        <td style={{padding:'7px 10px',textAlign:'center',fontWeight:'700',color:typeColor(type),borderBottom:'1px solid #E5E7EB',borderRight:'1px solid #E5E7EB'}}>{DOW_SHORT[date.getDay()]}</td>
+                        <td style={{padding:'5px 8px',textAlign:'center',borderBottom:'1px solid #E5E7EB',borderRight:'1px solid #E5E7EB'}}>
+                          {type!=='平日'&&<span style={{fontSize:'10px',fontWeight:'700',color:typeColor(type),backgroundColor:typeBg(type),padding:'2px 5px',borderRadius:'4px',border:`1px solid ${typeColor(type)}40`}}>{DAY_TYPE_CONF[type]?.icon}{type}</span>}
+                        </td>
+                        {slots.map(({sc,assigned,shortfall})=>(
+                          <td key={sc.key} style={{padding:'7px 10px',borderBottom:'1px solid #E5E7EB',borderRight:'1px solid #E5E7EB',verticalAlign:'top'}}>
+                            <div style={{display:'flex',flexWrap:'wrap',gap:'3px'}}>
+                              {assigned.map(s=>(
+                                <span key={s.id} style={{display:'inline-flex',alignItems:'center',gap:'3px',backgroundColor:'#F0F4FF',border:'1px solid #C7D2FE',borderRadius:'4px',padding:'2px 6px',fontSize:'11px',fontWeight:'600',whiteSpace:'nowrap'}}>
+                                  <span style={{width:'7px',height:'7px',borderRadius:'50%',backgroundColor:s.color,flexShrink:0,display:'inline-block'}}/>
+                                  {s.name}
+                                </span>
+                              ))}
+                              {shortfall>0&&<span style={{fontSize:'10px',color:'white',backgroundColor:'#EF4444',borderRadius:'4px',padding:'2px 5px',fontWeight:'700'}}>不足{shortfall}人</span>}
+                              {assigned.length===0&&<span style={{fontSize:'10px',color:'#D1D5DB'}}>—</span>}
+                            </div>
+                          </td>
+                        ))}
+                        <td style={{padding:'7px 10px',textAlign:'center',borderBottom:'1px solid #E5E7EB',fontWeight:'700'}}>
+                          <span style={{color:'#4F46E5'}}>{totalStaff}人</span>
+                          {totalShortfall>0&&<div style={{fontSize:'10px',color:'#EF4444'}}>不足{totalShortfall}</div>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+
+              {/* 凡例 */}
+              <div style={{marginTop:'16px',display:'flex',gap:'10px',flexWrap:'wrap',fontSize:'11px'}}>
+                {Object.entries(DAY_TYPE_CONF).filter(([t])=>t!=='平日').map(([type,c])=>(
+                  <span key={type} style={{display:'inline-flex',alignItems:'center',gap:'4px',padding:'3px 8px',backgroundColor:c.bg,color:c.color,border:`1px solid ${c.ring}`,borderRadius:'6px',fontWeight:'700'}}>{c.icon} {type}</span>
+                ))}
+                <span style={{display:'inline-flex',alignItems:'center',gap:'4px',padding:'3px 8px',backgroundColor:'#FEE2E2',color:'#DC2626',border:'1px solid #FECDD3',borderRadius:'6px',fontWeight:'700'}}>不足あり</span>
+              </div>
+            </div>
+          )}
+
+          {/* ===== 名前別表示 ===== */}
+          {view==='name'&&(
+            <div>
+              <div style={{fontSize:'14px',fontWeight:'800',color:'#1E1B4B',marginBottom:'12px'}}>👤 スタッフ別シフト表</div>
+              {byName.map(({s,shifts})=>(
+                <div key={s.id} style={{marginBottom:'18px',pageBreakInside:'avoid'}}>
+                  <div style={{display:'flex',alignItems:'center',gap:'8px',backgroundColor:'#1E1B4B',padding:'8px 14px',borderRadius:'8px 8px 0 0'}}>
+                    <div style={{width:'10px',height:'10px',borderRadius:'50%',backgroundColor:s.color,flexShrink:0}}/>
+                    <span style={{color:'white',fontWeight:'800',fontSize:'14px'}}>{s.name}</span>
+                    <span style={{color:'#C4B5FD',fontSize:'12px'}}>{s.role}</span>
+                    <span style={{marginLeft:'auto',color:'#A5B4FC',fontSize:'12px',fontWeight:'600'}}>{shifts.length}日勤務 ／ {shifts.reduce((t,sh)=>t+sh.slots.reduce((tt,sc)=>tt+(sc.endH-sc.startH),0),0)}時間</span>
+                  </div>
+                  <table style={{width:'100%',borderCollapse:'collapse',fontSize:'12px',border:'1px solid #E5E7EB'}}>
+                    <thead>
+                      <tr style={{backgroundColor:'#F3F4F6'}}>
+                        <th style={{padding:'6px 10px',textAlign:'center',fontWeight:'700',color:'#374151',borderBottom:'1px solid #E5E7EB',width:'52px'}}>日付</th>
+                        <th style={{padding:'6px 10px',textAlign:'center',fontWeight:'700',color:'#374151',borderBottom:'1px solid #E5E7EB',width:'36px'}}>曜</th>
+                        <th style={{padding:'6px 10px',textAlign:'center',fontWeight:'700',color:'#374151',borderBottom:'1px solid #E5E7EB',width:'64px'}}>種別</th>
+                        <th style={{padding:'6px 10px',textAlign:'left',fontWeight:'700',color:'#374151',borderBottom:'1px solid #E5E7EB'}}>勤務時間帯</th>
+                        <th style={{padding:'6px 10px',textAlign:'center',fontWeight:'700',color:'#374151',borderBottom:'1px solid #E5E7EB',width:'64px'}}>合計時間</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {shifts.map(({date,ds,type,slots:workedSlots},ri)=>{
+                        const totalHours = workedSlots.reduce((t,sc)=>t+(sc.endH-sc.startH),0);
+                        return (
+                          <tr key={ds} style={{backgroundColor:ri%2===0?typeBg(type):'white'}}>
+                            <td style={{padding:'6px 10px',textAlign:'center',fontWeight:'700',color:typeColor(type),borderBottom:'1px solid #F3F4F6',fontSize:'14px'}}>{date.getDate()}</td>
+                            <td style={{padding:'6px 10px',textAlign:'center',fontWeight:'700',color:typeColor(type),borderBottom:'1px solid #F3F4F6'}}>{DOW_SHORT[date.getDay()]}</td>
+                            <td style={{padding:'5px 8px',textAlign:'center',borderBottom:'1px solid #F3F4F6'}}>
+                              {type!=='平日'&&<span style={{fontSize:'10px',fontWeight:'700',color:typeColor(type),backgroundColor:typeBg(type),padding:'2px 5px',borderRadius:'4px',border:`1px solid ${typeColor(type)}40`}}>{DAY_TYPE_CONF[type]?.icon}{type}</span>}
+                            </td>
+                            <td style={{padding:'6px 10px',borderBottom:'1px solid #F3F4F6'}}>
+                              <div style={{display:'flex',flexWrap:'wrap',gap:'4px'}}>
+                                {workedSlots.map(sc=>(
+                                  <span key={sc.key} style={{display:'inline-block',backgroundColor:'#EEF2FF',border:'1px solid #C7D2FE',borderRadius:'4px',padding:'2px 8px',fontSize:'11px',fontWeight:'700',color:'#4338CA'}}>
+                                    {sc.label}（{decToTimeStr(sc.startH)}〜{decToTimeStr(sc.endH)}）
+                                  </span>
+                                ))}
+                              </div>
+                            </td>
+                            <td style={{padding:'6px 10px',textAlign:'center',fontWeight:'700',color:'#4F46E5',borderBottom:'1px solid #F3F4F6'}}>{totalHours}h</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot>
+                      <tr style={{backgroundColor:'#F5F3FF'}}>
+                        <td colSpan="3" style={{padding:'7px 10px',textAlign:'right',fontWeight:'700',color:'#4338CA',fontSize:'12px'}}>月間合計</td>
+                        <td style={{padding:'7px 10px',fontWeight:'700',color:'#4F46E5',fontSize:'12px'}}>{shifts.length}日勤務</td>
+                        <td style={{padding:'7px 10px',textAlign:'center',fontWeight:'900',color:'#4F46E5',fontSize:'13px'}}>{shifts.reduce((t,sh)=>t+sh.slots.reduce((tt,sc)=>tt+(sc.endH-sc.startH),0),0)}h</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  管理者：売上目標・ボーナス設定
+  // ============================================================
+  const AdminSalesTab = ({salesConfig,onUpdateConfig,salesData,onUpdateSalesData,specialDates,confirmedShifts,staff}) => {
+    const [inputMode,setInputMode]=useState('table'); // 'table' | 'calendar'
+    const lastD = new Date(YEAR,MONTH,0).getDate();
+    const allDates = Array.from({length:lastD},(_,i)=>new Date(YEAR,MONTH-1,i+1));
+    const DOW_SHORT=['日','月','火','水','木','金','土'];
+
+    // ティア編集
+    const updateTier=(id,field,val)=>onUpdateConfig('tiers', salesConfig.tiers.map(t=>t.id===id?{...t,[field]:val}:t));
+    const addTier=()=>onUpdateConfig('tiers',[...salesConfig.tiers,{id:Date.now(),minRate:130,label:'🏆 新ボーナス',bonusRate:15,color:'#8B5CF6',bg:'#F5F3FF',ring:'#C4B5FD'}]);
+    const removeTier=id=>onUpdateConfig('tiers',salesConfig.tiers.filter(t=>t.id!==id));
+
+    // 売上入力
+    const setTarget=(ds,val)=>onUpdateSalesData('targets',ds,parseInt(val.replace(/,/g,''))||0);
+    const setResult=(ds,val)=>onUpdateSalesData('results',ds,parseInt(val.replace(/,/g,''))||null);
+
+    // 月間サマリー
+    const totalTarget = Object.values(salesData.targets).reduce((s,v)=>s+(v||0),0);
+    const totalResult = Object.entries(salesData.results).reduce((s,[,v])=>s+(v||0),0);
+    const achievedDays = allDates.filter(d=>{
+      const ds=dateStr(d),r=salesData.results[ds],t=salesData.targets[ds];
+      return r!=null&&t&&r>=t;
+    }).length;
+    const inputDays = Object.values(salesData.results).filter(v=>v!=null).length;
+
+    return (
+      <div>
+        <SectionTitle>📊 売上目標・ボーナス設定</SectionTitle>
+
+        {/* 有効/無効トグル */}
+        <div style={{display:'flex',alignItems:'center',gap:'12px',marginBottom:'20px',padding:'12px 16px',backgroundColor:salesConfig.enabled?'#ECFDF5':'#F9FAFB',borderRadius:'10px',border:`1px solid ${salesConfig.enabled?'#6EE7B7':'#E5E7EB'}`}}>
+          <div style={{flex:1}}>
+            <div style={{fontSize:'13px',fontWeight:'800',color:salesConfig.enabled?'#065F46':'#374151'}}>💹 売上連動ボーナス</div>
+            <div style={{fontSize:'11px',color:'#6B7280',marginTop:'2px'}}>目標売上を達成した日は、スタッフの時給に自動でボーナスが上乗せされます</div>
+          </div>
+          <button onClick={()=>onUpdateConfig('enabled',!salesConfig.enabled)}
+            style={{padding:'8px 16px',backgroundColor:salesConfig.enabled?'#10B981':'#E5E7EB',color:salesConfig.enabled?'white':'#6B7280',border:'none',borderRadius:'8px',cursor:'pointer',fontSize:'13px',fontWeight:'800',transition:'all 0.2s'}}>
+            {salesConfig.enabled?'✅ ON':'OFF'}
+          </button>
+        </div>
+
+        {/* ボーナスティア設定 */}
+        <div style={{marginBottom:'24px'}}>
+          <div style={{fontSize:'13px',fontWeight:'700',color:'#374151',marginBottom:'10px'}}>🏆 達成率ごとのボーナス設定</div>
+          <div style={{backgroundColor:'#F9FAFB',borderRadius:'10px',padding:'14px',border:'1px solid #E5E7EB',marginBottom:'10px'}}>
+            <div style={{display:'grid',gridTemplateColumns:'28px 1fr 90px 90px 90px 36px',gap:'8px',alignItems:'center',marginBottom:'6px',fontSize:'10px',color:'#9CA3AF',fontWeight:'700',paddingLeft:'4px'}}>
+              <div/><div>ラベル</div><div style={{textAlign:'center'}}>達成率 (%以上)</div><div style={{textAlign:'center'}}>時給UP率 (%)</div><div style={{textAlign:'center'}}>プレビュー</div><div/>
+            </div>
+            {salesConfig.tiers.sort((a,b)=>a.minRate-b.minRate).map(t=>(
+              <div key={t.id} style={{display:'grid',gridTemplateColumns:'28px 1fr 90px 90px 90px 36px',gap:'8px',alignItems:'center',marginBottom:'8px',padding:'8px 6px',backgroundColor:t.bg,borderRadius:'8px',border:`1px solid ${t.ring}`}}>
+                <span style={{fontSize:'16px',textAlign:'center'}}>{t.label.split(' ')[0]}</span>
+                <input value={t.label} onChange={e=>updateTier(t.id,'label',e.target.value)}
+                  style={{padding:'5px 7px',border:`1px solid ${t.ring}`,borderRadius:'6px',fontSize:'12px',fontWeight:'700',color:t.color,backgroundColor:'white'}}/>
+                <div style={{textAlign:'center'}}>
+                  <input type="number" min="100" max="200" step="5" value={t.minRate} onChange={e=>updateTier(t.id,'minRate',parseInt(e.target.value)||100)}
+                    style={{width:'70px',padding:'5px',border:`1px solid ${t.ring}`,borderRadius:'6px',fontSize:'14px',fontWeight:'900',color:t.color,textAlign:'center',backgroundColor:'white'}}/>
+                  <span style={{fontSize:'10px',color:t.color}}>%〜</span>
+                </div>
+                <div style={{textAlign:'center'}}>
+                  <span style={{fontSize:'12px',color:'#9CA3AF'}}>＋</span>
+                  <input type="number" min="1" max="100" step="1" value={t.bonusRate} onChange={e=>updateTier(t.id,'bonusRate',parseInt(e.target.value)||1)}
+                    style={{width:'50px',padding:'5px',border:`1px solid ${t.ring}`,borderRadius:'6px',fontSize:'14px',fontWeight:'900',color:t.color,textAlign:'center',backgroundColor:'white'}}/>
+                  <span style={{fontSize:'10px',color:t.color}}>%</span>
+                </div>
+                <div style={{textAlign:'center'}}>
+                  <span style={{fontSize:'11px',fontWeight:'800',color:t.color,backgroundColor:t.bg,padding:'3px 8px',borderRadius:'6px',border:`1px solid ${t.ring}`,whiteSpace:'nowrap'}}>×{(1+t.bonusRate/100).toFixed(2)}</span>
+                </div>
+                {salesConfig.tiers.length>1
+                  ?<button onClick={()=>removeTier(t.id)} style={{padding:'3px',backgroundColor:'#FEE2E2',color:'#DC2626',border:'none',borderRadius:'4px',cursor:'pointer',fontSize:'12px',fontWeight:'700'}}>✕</button>
+                  :<div/>
+                }
+              </div>
+            ))}
+            <button onClick={addTier} style={{padding:'6px 14px',backgroundColor:'#EEF2FF',color:'#4F46E5',border:'2px dashed #A5B4FC',borderRadius:'7px',cursor:'pointer',fontSize:'12px',fontWeight:'700'}}>＋ ティアを追加</button>
+          </div>
+          <div style={{fontSize:'11px',color:'#9CA3AF',lineHeight:'1.7'}}>
+            ※ 例：目標¥180,000に対して実績¥216,000（120%達成）→ 超過達成ボーナス（+20%）が適用されます<br/>
+            ※ ボーナスは<strong>最も高いティア1つのみ</strong>が適用されます（重ねがけなし）
+          </div>
+        </div>
+
+        {/* 月間サマリー */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:'10px',marginBottom:'20px'}}>
+          {[
+            {label:'月間目標売上',val:`¥${totalTarget.toLocaleString()}`,sub:'合計',color:'#4F46E5',bg:'#EEF2FF'},
+            {label:'月間実績売上',val:`¥${totalResult.toLocaleString()}`,sub:`入力済み ${inputDays}日`,color:'#10B981',bg:'#ECFDF5'},
+            {label:'目標達成日数',val:`${achievedDays}日`,sub:`/ ${inputDays}日入力済み`,color:'#F59E0B',bg:'#FFFBEB'},
+            {label:'月間達成率',val:totalTarget>0?`${Math.round(totalResult/totalTarget*100)}%`:'—',sub:totalResult>=totalTarget?'🎉 月間達成！':'',color:totalResult>=totalTarget?'#10B981':'#EF4444',bg:totalResult>=totalTarget?'#ECFDF5':'#FEF2F2'},
+          ].map(({label,val,sub,color,bg})=>(
+            <div key={label} style={{backgroundColor:bg,borderRadius:'10px',padding:'12px',textAlign:'center'}}>
+              <div style={{fontSize:'10px',fontWeight:'700',color,marginBottom:'6px'}}>{label}</div>
+              <div style={{fontSize:'18px',fontWeight:'900',color}}>{val}</div>
+              <div style={{fontSize:'10px',color:'#9CA3AF',marginTop:'2px'}}>{sub}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* 日別売上入力テーブル */}
+        <div style={{fontSize:'13px',fontWeight:'700',color:'#374151',marginBottom:'10px'}}>📅 日別 目標・実績入力</div>
+        <div className="scrollable">
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:'12px'}}>
+            <thead>
+              <tr style={{backgroundColor:'#1E1B4B'}}>
+                {['日付','曜日','種別','目標売上 (¥)','実績売上 (¥)','達成率','ボーナス'].map(h=>(
+                  <th key={h} style={{padding:'7px 10px',color:'white',textAlign:'center',fontWeight:'700',borderBottom:'2px solid #3730A3',whiteSpace:'nowrap'}}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {allDates.map((date,ri)=>{
+                const ds=dateStr(date), type=getDateType(date,specialDates);
+                const target=salesData.targets[ds]||0, result=salesData.results[ds];
+                const rate=target&&result!=null?Math.round(result/target*100):null;
+                const bonus=getSalesBonus(ds,salesData,salesConfig);
+                const rowBg=result==null?'white':rate>=150?'#F0FDF4':rate>=120?'#EEF2FF':rate>=100?'#ECFDF5':rate>=80?'#FFFBEB':'#FEF2F2';
+                const DOW_COLOR=date.getDay()===6||date.getDay()===0?'#EF4444':date.getDay()===5?'#D97706':'#374151';
+                return (
+                  <tr key={ds} style={{backgroundColor:ri%2===0?rowBg:'white'}}>
+                    <td style={{padding:'6px 10px',textAlign:'center',fontWeight:'700',color:DOW_COLOR,borderBottom:'1px solid #F3F4F6',fontSize:'14px'}}>{date.getDate()}</td>
+                    <td style={{padding:'6px 10px',textAlign:'center',fontWeight:'700',color:DOW_COLOR,borderBottom:'1px solid #F3F4F6'}}>{['日','月','火','水','木','金','土'][date.getDay()]}</td>
+                    <td style={{padding:'5px 8px',textAlign:'center',borderBottom:'1px solid #F3F4F6'}}>
+                      {type!=='平日'&&<span style={{fontSize:'9px',fontWeight:'700',color:DAY_TYPE_CONF[type]?.color,backgroundColor:DAY_TYPE_CONF[type]?.bg,padding:'1px 4px',borderRadius:'3px'}}>{DAY_TYPE_CONF[type]?.icon}{type}</span>}
+                    </td>
+                    <td style={{padding:'5px 8px',borderBottom:'1px solid #F3F4F6',textAlign:'center'}}>
+                      <div style={{display:'flex',alignItems:'center',gap:'4px',justifyContent:'center'}}>
+                        <span style={{fontSize:'10px',color:'#9CA3AF'}}>¥</span>
+                        <input type="number" min="0" step="1000" value={target||''}
+                          onChange={e=>setTarget(ds,e.target.value)}
+                          style={{width:'100px',padding:'4px 6px',border:'1px solid #C4B5FD',borderRadius:'5px',textAlign:'right',fontSize:'12px',fontWeight:'700',color:'#4F46E5'}}/>
+                      </div>
+                    </td>
+                    <td style={{padding:'5px 8px',borderBottom:'1px solid #F3F4F6',textAlign:'center'}}>
+                      <div style={{display:'flex',alignItems:'center',gap:'4px',justifyContent:'center'}}>
+                        <span style={{fontSize:'10px',color:'#9CA3AF'}}>¥</span>
+                        <input type="number" min="0" step="1000" value={result!=null?result:''}
+                          onChange={e=>setResult(ds,e.target.value)}
+                          placeholder="未入力"
+                          style={{width:'100px',padding:'4px 6px',border:'1px solid #D1FAE5',borderRadius:'5px',textAlign:'right',fontSize:'12px',fontWeight:'700',color:'#065F46',backgroundColor:result!=null?'#F0FDF4':'white'}}/>
+                      </div>
+                    </td>
+                    <td style={{padding:'6px 10px',textAlign:'center',borderBottom:'1px solid #F3F4F6'}}>
+                      {rate!=null?(
+                        <div>
+                          <div style={{fontSize:'14px',fontWeight:'900',color:rate>=100?'#10B981':rate>=80?'#F59E0B':'#EF4444'}}>{rate}%</div>
+                          <div style={{fontSize:'10px',color:'#9CA3AF'}}>{rate>=100?'✅達成':'📉未達'}</div>
+                        </div>
+                      ):<span style={{color:'#D1D5DB',fontSize:'12px'}}>—</span>}
+                    </td>
+                    <td style={{padding:'6px 10px',textAlign:'center',borderBottom:'1px solid #F3F4F6'}}>
+                      {bonus.tier?(
+                        <span style={{display:'inline-block',padding:'3px 8px',backgroundColor:bonus.tier.bg,color:bonus.tier.color,border:`1px solid ${bonus.tier.ring}`,borderRadius:'6px',fontSize:'10px',fontWeight:'800',whiteSpace:'nowrap'}}>
+                          {bonus.tier.label}<br/>+{bonus.tier.bonusRate}%
+                        </span>
+                      ):(
+                        <span style={{color:rate!=null?'#9CA3AF':'#D1D5DB',fontSize:'11px'}}>{rate!=null?'なし':'—'}</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  管理者：店舗設定
+  // ============================================================
+  const AdminStoreSettings = ({slotConfig,onUpdateSlot,onAddSlot,onRemoveSlot,storeSettings,onUpdateSettings}) => (
+    <div>
+      <SectionTitle>🏪 店舗設定</SectionTitle>
+      <div style={{marginBottom:'20px'}}>
+        <div style={{fontSize:'13px',fontWeight:'700',color:'#374151',marginBottom:'10px'}}>⏰ 勤務時間帯の定義</div>
+        {slotConfig.map((sc,si)=>(
+          <div key={sc.key} style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'8px',padding:'10px 12px',backgroundColor:'#F0F4FF',borderRadius:'10px',border:'1px solid #C7D2FE',flexWrap:'wrap'}}>
+            <input value={sc.label} onChange={e=>onUpdateSlot(si,'label',e.target.value)} style={{width:'68px',padding:'5px 7px',border:'1px solid #A5B4FC',borderRadius:'6px',fontSize:'13px',fontWeight:'700',color:'#4F46E5'}}/>
+            <input type="time" value={decToTimeStr(sc.startH)} onChange={e=>{const[h,m]=e.target.value.split(':').map(Number);onUpdateSlot(si,'startH',h+m/60);}} style={{padding:'5px',border:'1px solid #A5B4FC',borderRadius:'6px',fontSize:'13px'}}/>
+            <span style={{color:'#6B7280',fontWeight:'700'}}>〜</span>
+            <input type="time" value={decToTimeStr(sc.endH)} onChange={e=>{const[h,m]=e.target.value.split(':').map(Number);onUpdateSlot(si,'endH',h+m/60);}} style={{padding:'5px',border:'1px solid #A5B4FC',borderRadius:'6px',fontSize:'13px'}}/>
+            <span style={{fontSize:'11px',color:'#6366F1',fontWeight:'700',backgroundColor:'#EEF2FF',padding:'2px 7px',borderRadius:'12px'}}>{+(sc.endH-sc.startH).toFixed(1)}h</span>
+            {slotConfig.length>1&&<button onClick={()=>onRemoveSlot(si)} style={{marginLeft:'auto',padding:'3px 8px',backgroundColor:'#FEE2E2',color:'#DC2626',border:'none',borderRadius:'5px',cursor:'pointer',fontSize:'11px',fontWeight:'700'}}>削除</button>}
+          </div>
+        ))}
+        <button onClick={onAddSlot} style={{padding:'7px 14px',backgroundColor:'#EEF2FF',color:'#4F46E5',border:'2px dashed #A5B4FC',borderRadius:'8px',cursor:'pointer',fontSize:'12px',fontWeight:'700'}}>＋ 時間帯を追加</button>
+      </div>
+      <div style={{fontSize:'13px',fontWeight:'700',color:'#374151',marginBottom:'10px'}}>👥 曜日別 必要人数・スキル条件</div>
+      <div className="scrollable">
+        <table style={{borderCollapse:'collapse',fontSize:'12px',width:'100%'}}>
+          <thead><tr style={{backgroundColor:'#1E1B4B'}}>
+            <th style={{padding:'8px 12px',color:'white',textAlign:'left',fontWeight:'700',borderBottom:'2px solid #3730A3',minWidth:'80px'}}>時間帯</th>
+            {DOW_JP.map((d,di)=><th key={d} style={{padding:'8px 12px',textAlign:'center',fontWeight:'700',color:di>=5?'#FCA5A5':di===4?'#FCD34D':'white',borderBottom:'2px solid #3730A3',minWidth:'88px'}}>{d}曜</th>)}
+          </tr></thead>
+          <tbody>
+            {slotConfig.map((sc,si)=>(
+              <tr key={sc.key} style={{backgroundColor:si%2===0?'#FAFAFA':'#F5F3FF'}}>
+                <td style={{padding:'10px 12px',borderBottom:'1px solid #E5E7EB'}}>
+                  <div style={{fontWeight:'700',color:'#4F46E5'}}>{sc.label}</div>
+                  <div style={{fontSize:'10px',color:'#9CA3AF'}}>{decToTimeStr(sc.startH)}〜{decToTimeStr(sc.endH)}</div>
+                </td>
+                {DOW_JP.map(day=>{
+                  const s=storeSettings[day]?.[sc.key]||{required:2,minSkill:1};
+                  return (
+                    <td key={day} style={{padding:'6px',borderBottom:'1px solid #E5E7EB',textAlign:'center'}}>
+                      <div style={{display:'flex',flexDirection:'column',gap:'4px',alignItems:'center'}}>
+                        <div style={{display:'flex',alignItems:'center',gap:'2px'}}>
+                          <span style={{fontSize:'9px',color:'#9CA3AF'}}>人</span>
+                          <input type="number" min="0" max="10" value={s.required} onChange={e=>onUpdateSettings(day,sc.key,'required',parseInt(e.target.value)||0)} style={{width:'36px',padding:'2px',border:'1px solid #C4B5FD',borderRadius:'4px',textAlign:'center',fontSize:'13px',fontWeight:'700',color:'#4F46E5'}}/>
+                        </div>
+                        <div style={{display:'flex',alignItems:'center',gap:'2px'}}>
+                          <span style={{fontSize:'9px',color:'#9CA3AF'}}>Lv≥</span>
+                          <select value={s.minSkill} onChange={e=>onUpdateSettings(day,sc.key,'minSkill',parseInt(e.target.value))} style={{width:'40px',padding:'2px',border:'1px solid #C4B5FD',borderRadius:'4px',fontSize:'11px'}}>
+                            {[1,2,3,4,5].map(v=><option key={v} value={v}>{v}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+
+  // ============================================================
+  //  管理者：提出ルール
+  // ============================================================
+  const AdminSubmissionRules = ({rules,onUpdate}) => (
+    <div>
+      <SectionTitle>📋 提出ルール・締め日設定</SectionTitle>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(240px,1fr))',gap:'12px',marginBottom:'18px'}}>
+        {[
+          {label:'📅 提出サイクル',key:'cycle',type:'select',options:[{v:'monthly',l:'月1回'},{v:'bimonthly',l:'月2回（上旬/下旬）'},{v:'weekly',l:'週1回'}]},
+          {label:'⏰ 提出締め切り日',key:'deadline',type:'number',unit:'日',min:1,max:31},
+          {label:'💴 給与 締め日',  key:'closingDay',type:'number',unit:'日',min:1,max:31},
+          {label:'💰 給与支払日',   key:'payDay',    type:'number',unit:'日',min:1,max:31},
+        ].map(({label,key,type,options,unit,min,max})=>(
+          <div key={key} style={{backgroundColor:'#F9FAFB',borderRadius:'10px',padding:'14px',border:'1px solid #E5E7EB'}}>
+            <div style={{fontSize:'12px',fontWeight:'700',color:'#374151',marginBottom:'10px'}}>{label}</div>
+            {type==='select'
+              ?<select value={rules[key]} onChange={e=>onUpdate(key,e.target.value)} style={{width:'100%',padding:'8px',border:'1px solid #C4B5FD',borderRadius:'7px',fontSize:'13px'}}>{options.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}</select>
+              :<div style={{display:'flex',alignItems:'center',gap:'8px'}}><input type="number" min={min} max={max} value={rules[key]} onChange={e=>onUpdate(key,parseInt(e.target.value)||min)} style={{width:'76px',padding:'8px',border:'1px solid #C4B5FD',borderRadius:'7px',fontSize:'22px',fontWeight:'900',color:'#4F46E5',textAlign:'center'}}/><span style={{fontSize:'14px',color:'#6B7280'}}>{unit}</span></div>
+            }
+          </div>
+        ))}
+      </div>
+      <div style={{backgroundColor:'#EEF2FF',borderRadius:'10px',padding:'12px',fontSize:'13px',color:'#4B5563',lineHeight:'2.2'}}>
+        🗓 提出締め切り：{MONTH}月<strong>{rules.deadline}</strong>日
+        📆 計算期間：前月<strong>{rules.closingDay+1}</strong>日〜今月<strong>{rules.closingDay}</strong>日
+        💴 支払日：{MONTH}月<strong>{rules.payDay}</strong>日
+      </div>
+    </div>
+  );
+
+  // ============================================================
+  //  管理者：スタッフ管理（PIN管理機能付き）
+  // ============================================================
+  const AdminStaffTab = ({staff,onAddStaff,onDeleteStaff,wageConfig,onUpdateWage,pins,pinChanged,onResetPin}) => {
+    const [name,setName]=useState('');const [type,setType]=useState('parttime');
+    const [skill,setSkill]=useState(1);const [role,setRole]=useState('バイト');
+    const handleAdd=()=>{
+      if(!name.trim()) return;
+      const id=Date.now();
+      onAddStaff({id,name,type,skillLevel:skill,role,color:PALETTE[staff.length%PALETTE.length]});
+      onUpdateWage('baseWages',id,1000);setName('');
+    };
+    return (
+      <div>
+        <SectionTitle>👥 スタッフ管理</SectionTitle>
+        <div style={{backgroundColor:'#EEF2FF',padding:'14px',borderRadius:'10px',marginBottom:'18px'}}>
+          <div style={{fontSize:'12px',fontWeight:'700',color:'#4338CA',marginBottom:'10px'}}>＋ 新規スタッフ追加（初期PIN: 0000 で作成されます）</div>
+          <div style={{display:'flex',gap:'8px',flexWrap:'wrap',alignItems:'flex-end'}}>
+            {[
+              {l:'名前',el:<input value={name} onChange={e=>setName(e.target.value)} placeholder="山田 花子" style={{padding:'7px',border:'1px solid #C4B5FD',borderRadius:'7px',fontSize:'13px',width:'120px'}}/>},
+              {l:'雇用',el:<select value={type} onChange={e=>setType(e.target.value)} style={{padding:'7px',border:'1px solid #C4B5FD',borderRadius:'7px',fontSize:'13px'}}><option value="employee">社員</option><option value="parttime">バイト</option></select>},
+              {l:'役割',el:<input value={role} onChange={e=>setRole(e.target.value)} style={{padding:'7px',border:'1px solid #C4B5FD',borderRadius:'7px',fontSize:'13px',width:'80px'}}/>},
+              {l:'スキル',el:<select value={skill} onChange={e=>setSkill(parseInt(e.target.value))} style={{padding:'7px',border:'1px solid #C4B5FD',borderRadius:'7px',fontSize:'13px'}}>{[1,2,3,4,5].map(v=><option key={v} value={v}>Lv{v}</option>)}</select>},
+            ].map(({l,el})=><div key={l}><div style={{fontSize:'10px',color:'#6B7280',marginBottom:'2px'}}>{l}</div>{el}</div>)}
+            <button onClick={handleAdd} style={{padding:'8px 14px',backgroundColor:'#4F46E5',color:'white',border:'none',borderRadius:'7px',fontSize:'13px',fontWeight:'700',cursor:'pointer'}}>追加</button>
+          </div>
+        </div>
+        <div className="scrollable">
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:'13px'}}>
+            <thead><tr style={{backgroundColor:'#F3F4F6'}}>
+              {['名前','雇用','役割','スキル','基本時給','PIN状態','操作'].map(h=>(
+                <th key={h} style={{padding:'9px 12px',textAlign:h==='名前'?'left':'center',fontWeight:'700',color:'#374151',borderBottom:'2px solid #E5E7EB',whiteSpace:'nowrap'}}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {staff.map((s,i)=>(
+                <tr key={s.id} style={{backgroundColor:i%2===0?'white':'#FAFAFA'}}>
+                  <td style={{padding:'9px 12px',borderBottom:'1px solid #E5E7EB'}}>
+                    <div style={{display:'flex',alignItems:'center',gap:'7px'}}>
+                      <div style={{width:'8px',height:'8px',borderRadius:'50%',backgroundColor:s.color,flexShrink:0}}/>
+                      <span style={{fontWeight:'600'}}>{s.name}</span>
+                    </div>
+                  </td>
+                  <td style={{padding:'9px 12px',borderBottom:'1px solid #E5E7EB',textAlign:'center'}}>
+                    <Tag color={s.type==='employee'?'#1D4ED8':'#92400E'} bg={s.type==='employee'?'#DBEAFE':'#FEF3C7'}>{s.type==='employee'?'社員':'バイト'}</Tag>
+                  </td>
+                  <td style={{padding:'9px 12px',borderBottom:'1px solid #E5E7EB',textAlign:'center',color:'#6B7280'}}>{s.role}</td>
+                  <td style={{padding:'9px 12px',borderBottom:'1px solid #E5E7EB',textAlign:'center'}}><SkillStars level={s.skillLevel}/></td>
+                  <td style={{padding:'7px 12px',borderBottom:'1px solid #E5E7EB',textAlign:'center'}}>
+                    <div style={{display:'flex',alignItems:'center',gap:'2px',justifyContent:'center'}}>
+                      <span style={{fontSize:'11px',color:'#9CA3AF'}}>¥</span>
+                      <input type="number" min="900" max="5000" step="50" value={wageConfig.baseWages[s.id]||1000}
+                        onChange={e=>onUpdateWage('baseWages',s.id,parseInt(e.target.value)||900)}
+                        style={{width:'68px',padding:'4px',border:'1px solid #C4B5FD',borderRadius:'5px',textAlign:'center',fontSize:'13px',fontWeight:'700',color:'#4F46E5'}}/>
+                    </div>
+                  </td>
+                  {/* PIN状態カラム */}
+                  <td style={{padding:'9px 12px',borderBottom:'1px solid #E5E7EB',textAlign:'center'}}>
+                    {pinChanged[s.id]
+                      ?<Tag color='#15803D' bg='#DCFCE7'>✅ 設定済み</Tag>
+                      :<Tag color='#92400E' bg='#FEF9C3'>⚠ 初期PIN</Tag>
+                    }
+                  </td>
+                  <td style={{padding:'9px 12px',borderBottom:'1px solid #E5E7EB',textAlign:'center'}}>
+                    <div style={{display:'flex',gap:'5px',justifyContent:'center'}}>
+                      <button onClick={()=>{if(window.confirm(`${s.name}のPINを初期化（0000）しますか？`))onResetPin(s.id);}}
+                        title="PINを0000に戻し、次回ログイン時に再設定させます"
+                        style={{padding:'3px 8px',backgroundColor:'#FEF3C7',color:'#92400E',border:'none',borderRadius:'4px',fontSize:'11px',cursor:'pointer',fontWeight:'700',whiteSpace:'nowrap'}}>PIN初期化</button>
+                      <button onClick={()=>onDeleteStaff(s.id)}
+                        style={{padding:'3px 8px',backgroundColor:'#FEE2E2',color:'#DC2626',border:'none',borderRadius:'4px',fontSize:'11px',cursor:'pointer',fontWeight:'600'}}>削除</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  管理者：賃金・特別日
+  // ============================================================
+  const AdminWageTab = ({wageConfig,onUpdateWage,specialDates,onUpdateSpecialDate}) => {
+    const lastD=new Date(YEAR,MONTH,0).getDate();
+    const allDates=Array.from({length:lastD},(_,i)=>new Date(YEAR,MONTH-1,i+1));
+    const cycle=ds=>{const cur=specialDates[ds];onUpdateSpecialDate(ds,!cur?'holiday':cur==='holiday'?'pre-holiday':null);};
+    return (
+      <div>
+        <SectionTitle>💴 賃金・特別日設定</SectionTitle>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))',gap:'10px',marginBottom:'22px'}}>
+          {Object.entries(wageConfig.multipliers).map(([type,mult])=>{
+            const c=DAY_TYPE_CONF[type];if(!c)return null;
+            return (
+              <div key={type} style={{backgroundColor:c.bg,border:`1px solid ${c.ring}`,borderRadius:'10px',padding:'12px',textAlign:'center',minWidth:0}}>
+                <div style={{fontSize:'12px',fontWeight:'700',color:c.color,marginBottom:'7px',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{c.icon} {type}</div>
+                <div style={{display:'flex',alignItems:'center',gap:'3px',justifyContent:'center',flexWrap:'wrap'}}>
+                  <input type="number" min="1.0" max="3.0" step="0.05" value={mult}
+                    onChange={e=>onUpdateWage('multipliers',type,parseFloat(e.target.value)||1.0)}
+                    style={{width:'64px',minWidth:0,padding:'4px',border:`1px solid ${c.ring}`,borderRadius:'5px',textAlign:'center',fontSize:'16px',fontWeight:'900',color:c.color,backgroundColor:'white'}}/>
+                  <span style={{fontSize:'11px',color:c.color,flexShrink:0}}>倍</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{fontSize:'13px',fontWeight:'700',color:'#374151',marginBottom:'8px'}}>🗓 特別日設定（クリック：通常→祝日→祝前日→通常）</div>
+        <div style={{display:'flex',flexWrap:'wrap',gap:'5px'}}>
+          {allDates.map(date=>{
+            const ds=dateStr(date),type=specialDates[ds],bg=!type?'#F3F4F6':type==='holiday'?'#EDE9FE':'#DBEAFE',color=!type?'#6B7280':type==='holiday'?'#7C3AED':'#2563EB';
+            return <button key={ds} onClick={()=>cycle(ds)} style={{padding:'5px 9px',backgroundColor:bg,color,border:`1px solid ${color}30`,borderRadius:'7px',cursor:'pointer',fontSize:'11px',fontWeight:'700'}}>{date.getDate()}日{type?`(${type==='holiday'?'祝':'祝前'})`:''}
+            </button>;
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  管理者：自動作成
+  // ============================================================
+  const AdminAutoGenerate = ({slotConfig,storeSettings,availability,staff,specialDates,onConfirm}) => {
+    const [result,setResult]=useState(null),[busy,setBusy]=useState(false);
+    const run=()=>{setBusy(true);setTimeout(()=>{setResult(generateMonthlyShifts(YEAR,MONTH,slotConfig,storeSettings,availability,staff));setBusy(false);},800);};
+    return (
+      <div>
+        <SectionTitle>✨ AI自動シフト作成</SectionTitle>
+        <div style={{backgroundColor:'#EEF2FF',borderRadius:'12px',padding:'16px',marginBottom:'18px',fontSize:'12px',color:'#4B5563',lineHeight:'2'}}>
+          ✅ 希望時間とシフトの<strong>オーバーラップ（1時間以上）</strong>で自動判定<br/>
+          ✅ スキル条件・必要人数を満たすよう最適化<br/>
+          ✅ 勤務回数の公平性を考慮
+        </div>
+        <button onClick={run} disabled={busy} style={{padding:'12px 26px',backgroundColor:busy?'#A5B4FC':'#4F46E5',color:'white',border:'none',borderRadius:'10px',fontSize:'15px',fontWeight:'800',cursor:busy?'not-allowed':'pointer',marginBottom:'18px'}}>
+          {busy?'⏳ 生成中...':'🚀 シフトを自動作成'}
+        </button>
+        {result&&(
+          <div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(110px,1fr))',gap:'8px',marginBottom:'18px'}}>
+              {staff.map(s=>(
+                <div key={s.id} style={{backgroundColor:'#F9FAFB',borderRadius:'10px',padding:'12px',textAlign:'center',border:'1px solid #E5E7EB'}}>
+                  <div style={{width:'26px',height:'26px',borderRadius:'50%',backgroundColor:s.color,margin:'0 auto 5px',display:'flex',alignItems:'center',justifyContent:'center',color:'white',fontWeight:'900',fontSize:'11px'}}>{s.name[0]}</div>
+                  <div style={{fontSize:'11px',fontWeight:'700',color:'#374151'}}>{s.name.split(' ')[1]||s.name}</div>
+                  <div style={{fontSize:'22px',fontWeight:'900',color:'#4F46E5'}}>{result.workCount[s.id]||0}</div>
+                  <div style={{fontSize:'10px',color:'#9CA3AF'}}>回</div>
+                </div>
+              ))}
+            </div>
+            <button onClick={()=>onConfirm(result.shifts)} style={{padding:'11px 22px',backgroundColor:'#10B981',color:'white',border:'none',borderRadius:'10px',fontSize:'14px',fontWeight:'800',cursor:'pointer'}}>✅ このシフトを確定する</button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  管理者：シフト確認カレンダー
+  // ============================================================
+  const AdminShiftCalendar = ({slotConfig,confirmedShifts,staff,specialDates}) => {
+    const [fs,setFs]=useState('all');
+    const [showPrint,setShowPrint]=useState(false);
+    const renderDay=date=>{
+      const ds=dateStr(date);
+      return <div style={{fontSize:'9px'}}>{slotConfig.map(sc=>{
+        const key=`${ds}_${sc.key}`,sh=confirmedShifts[key];if(!sh)return null;
+        const assigned=fs==='all'?sh.assigned:sh.assigned.filter(id=>id===parseInt(fs));
+        if(assigned.length===0&&fs!=='all')return null;
+        return <div key={sc.key} style={{marginBottom:'3px'}}>
+          <div style={{fontSize:'8px',color:'#9CA3AF'}}>{decToTimeStr(sc.startH)}〜{decToTimeStr(sc.endH)}</div>
+          <div style={{display:'flex',flexWrap:'wrap',gap:'1px'}}>
+            {assigned.map(id=>{const s=staff.find(x=>x.id===id);if(!s)return null;return<span key={id} title={s.name} style={{display:'inline-flex',alignItems:'center',justifyContent:'center',width:'14px',height:'14px',borderRadius:'50%',backgroundColor:s.color,color:'white',fontSize:'7px',fontWeight:'900'}}>{s.name[0]}</span>;})}
+            {sh.shortfall>0&&<span style={{fontSize:'8px',color:'#DC2626',fontWeight:'700'}}>-{sh.shortfall}</span>}
+          </div>
+        </div>;
+      })}</div>;
+    };
+    return (
+      <div>
+        <SectionTitle>📅 シフト管理カレンダー</SectionTitle>
+        <div style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'12px',flexWrap:'wrap'}}>
+          <select value={fs} onChange={e=>setFs(e.target.value)} style={{padding:'6px 10px',border:'1px solid #C4B5FD',borderRadius:'7px',fontSize:'13px'}}>
+            <option value="all">全スタッフ</option>
+            {staff.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          {Object.keys(confirmedShifts).length>0&&(
+            <button onClick={()=>setShowPrint(true)}
+              style={{marginLeft:'auto',padding:'7px 16px',backgroundColor:'#1E1B4B',color:'white',border:'none',borderRadius:'8px',cursor:'pointer',fontSize:'13px',fontWeight:'700',display:'flex',alignItems:'center',gap:'6px'}}>
+              🖨 印刷・プレビュー
+            </button>
+          )}
+        </div>
+        {Object.keys(confirmedShifts).length===0
+          ?<div style={{textAlign:'center',padding:'48px',color:'#9CA3AF',fontSize:'14px',backgroundColor:'#F9FAFB',borderRadius:'12px'}}>「✨ 自動作成」タブで生成してください。</div>
+          :<MonthCalendar year={YEAR} month={MONTH} specialDates={specialDates} renderDay={renderDay}/>
+        }
+        {showPrint&&<PrintModal confirmedShifts={confirmedShifts} slotConfig={slotConfig} staff={staff} specialDates={specialDates} onClose={()=>setShowPrint(false)}/>}
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  管理者：希望確認
+  // ============================================================
+  const AdminRequestView = ({availability,staff,specialDates}) => {
+    const [vs,setVs]=useState(staff[0]?.id||1);
+    const renderDay=date=>{
+      const ds=dateStr(date),entries=availability[vs]?.[ds]||[];
+      if(!entries.length) return <div style={{fontSize:'8px',color:'#D1D5DB',textAlign:'center',marginTop:'2px'}}>—</div>;
+      return <div>{entries.map((e,i)=><div key={i} style={{fontSize:'8px',backgroundColor:'#C7D2FE',borderRadius:'3px',padding:'1px 3px',marginBottom:'1px',color:'#3730A3',fontWeight:'700'}}>{e.from.slice(0,5)}〜{e.to.slice(0,5)}</div>)}</div>;
+    };
+    return (
+      <div>
+        <SectionTitle>👁 スタッフ希望確認（管理者専用）</SectionTitle>
+        <div style={{backgroundColor:'#FEF3C7',border:'1px solid #FCD34D',borderRadius:'8px',padding:'8px 12px',marginBottom:'12px',fontSize:'12px',color:'#92400E',fontWeight:'600'}}>🔒 このタブは管理者のみ閲覧可能です。</div>
+        <div style={{display:'flex',gap:'6px',marginBottom:'12px',flexWrap:'wrap'}}>
+          {staff.map(s=><button key={s.id} onClick={()=>setVs(s.id)} style={{padding:'5px 11px',backgroundColor:vs===s.id?s.color:'#F3F4F6',color:vs===s.id?'white':'#374151',border:`2px solid ${vs===s.id?s.color:'#E5E7EB'}`,borderRadius:'20px',cursor:'pointer',fontSize:'12px',fontWeight:'700'}}>{s.name}</button>)}
+        </div>
+        <MonthCalendar year={YEAR} month={MONTH} specialDates={specialDates} renderDay={renderDay}/>
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  スタッフ：希望カレンダー
+  // ============================================================
+  const StaffCalendar = ({staffId,staff,availability,onUpdateAvailability,confirmedShifts,specialDates,slotConfig,wageConfig}) => {
+    const [modalDate,setModalDate]=useState(null);
+    const me=staff.find(s=>s.id===staffId);
+    const renderDay=date=>{
+      const ds=dateStr(date),entries=availability[staffId]?.[ds]||[];
+      const type=getDateType(date,specialDates),mult=wageConfig.multipliers[type]||1.0,base=wageConfig.baseWages[staffId]||1000;
+      const confirmed=slotConfig.filter(sc=>confirmedShifts[`${ds}_${sc.key}`]?.assigned?.includes(staffId));
+      return (
+        <div>
+          {mult>1.0&&<div style={{fontSize:'8px',fontWeight:'800',color:DAY_TYPE_CONF[type]?.color,marginBottom:'1px',backgroundColor:DAY_TYPE_CONF[type]?.bg,borderRadius:'3px',padding:'0 2px',display:'inline-block'}}>¥{Math.round(base*mult)}/h</div>}
+          {entries.length>0
+            ?entries.map((e,i)=><div key={i} style={{fontSize:'8px',backgroundColor:'#A5F3FC',borderRadius:'3px',padding:'1px 3px',marginBottom:'1px',color:'#0E7490',fontWeight:'700',whiteSpace:'nowrap',overflow:'hidden'}}>{e.from.slice(0,5)}〜{e.to.slice(0,5)}</div>)
+            :<div style={{fontSize:'8px',color:'#D1D5DB',textAlign:'center',marginTop:'2px'}}>未入力</div>
+          }
+          {confirmed.map(sc=><div key={sc.key} style={{fontSize:'7px',backgroundColor:'#BBF7D0',borderRadius:'2px',padding:'1px 3px',color:'#15803D',fontWeight:'800',marginTop:'1px'}}>✅{sc.label}</div>)}
+        </div>
+      );
+    };
+    const lastD=new Date(YEAR,MONTH,0).getDate();
+    const incentiveDays=Array.from({length:lastD},(_,i)=>new Date(YEAR,MONTH-1,i+1)).filter(d=>getDateType(d,specialDates)!=='平日');
+    return (
+      <div>
+        <div style={{display:'flex',alignItems:'center',gap:'10px',marginBottom:'12px',padding:'10px 12px',backgroundColor:'#F5F3FF',borderRadius:'10px'}}>
+          <div style={{width:'34px',height:'34px',borderRadius:'50%',backgroundColor:me?.color||'#6366F1',display:'flex',alignItems:'center',justifyContent:'center',color:'white',fontWeight:'900',fontSize:'15px',flexShrink:0}}>{me?.name?.[0]}</div>
+          <div><div style={{fontWeight:'800',fontSize:'14px',color:'#1E1B4B'}}>{me?.name}</div><div style={{fontSize:'11px',color:'#6B7280'}}>{me?.role} ・ {MONTH}月のシフト希望入力</div></div>
+        </div>
+        {incentiveDays.length>0&&(
+          <div style={{backgroundColor:'#FFFBEB',border:'1px solid #FCD34D',borderRadius:'10px',padding:'10px 12px',marginBottom:'12px'}}>
+            <div style={{fontSize:'11px',fontWeight:'700',color:'#92400E',marginBottom:'5px'}}>⚡ この日は時給アップ！</div>
+            <div style={{display:'flex',flexWrap:'wrap',gap:'4px'}}>
+              {incentiveDays.map(d=>{const type=getDateType(d,specialDates),c=DAY_TYPE_CONF[type],mult=wageConfig.multipliers[type]||1.0,base=wageConfig.baseWages[staffId]||1000;
+                return <span key={dateStr(d)} style={{padding:'2px 7px',backgroundColor:c.bg,color:c.color,border:`1px solid ${c.ring}`,borderRadius:'6px',fontSize:'10px',fontWeight:'700'}}>{d.getDate()}日 {c.icon} ¥{Math.round(base*mult)}/h</span>;})}
+            </div>
+          </div>
+        )}
+        <div style={{fontSize:'11px',color:'#6B7280',marginBottom:'7px'}}>📅 日付をタップして希望時間を入力（例：17:00〜23:00）</div>
+        <MonthCalendar year={YEAR} month={MONTH} specialDates={specialDates} renderDay={renderDay} onClickDate={setModalDate}/>
+        {modalDate&&<TimeEntryModal date={modalDate} entries={availability[staffId]?.[dateStr(modalDate)]||[]}
+          onSave={entries=>{onUpdateAvailability(staffId,dateStr(modalDate),entries);setModalDate(null);}}
+          onClose={()=>setModalDate(null)}/>}
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  スタッフ：給与シミュレーション
+  // ============================================================
+  const StaffSalary = ({staffId,staff,confirmedShifts,slotConfig,wageConfig,specialDates,rules,salesData,salesConfig}) => {
+    const salary=useMemo(()=>calcSalary(staffId,YEAR,MONTH,rules.closingDay,confirmedShifts,slotConfig,wageConfig,specialDates,salesData,salesConfig),[staffId,confirmedShifts,wageConfig,specialDates,rules,slotConfig,salesData,salesConfig]);
+    const hasSalesBonus = salary.bonusTotal > 0;
+    return (
+      <div>
+        <SectionTitle>💰 給与シミュレーション</SectionTitle>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(145px,1fr))',gap:'10px',marginBottom:'18px'}}>
+          {[
+            {label:'総支給見込み',val:fmtYen(salary.total),sub:'全シフト合計',color:'#4F46E5',bg:'#EEF2FF'},
+            {label:`${MONTH}月${rules.closingDay}日締め分`,val:fmtYen(salary.inPeriod),sub:'今回の給与期間',color:'#10B981',bg:'#ECFDF5'},
+            {label:'勤務回数',val:`${salary.slots_list.length}回`,sub:`合計${salary.slots_list.reduce((s,x)=>s+x.hours,0)}時間`,color:'#F59E0B',bg:'#FFFBEB'},
+            ...(hasSalesBonus ? [{label:'売上ボーナス',val:fmtYen(salary.bonusTotal),sub:'売上達成による加算分',color:'#10B981',bg:'#ECFDF5'}] : []),
+          ].map(({label,val,sub,color,bg})=>(
+            <div key={label} style={{backgroundColor:bg,borderRadius:'12px',padding:'14px',textAlign:'center'}}>
+              <div style={{fontSize:'11px',fontWeight:'700',color,marginBottom:'7px'}}>{label}</div>
+              <div style={{fontSize:'20px',fontWeight:'900',color}}>{val}</div>
+              <div style={{fontSize:'10px',color:'#9CA3AF',marginTop:'3px'}}>{sub}</div>
+            </div>
+          ))}
+        </div>
+        {salary.slots_list.length===0
+          ?<div style={{textAlign:'center',padding:'36px',color:'#9CA3AF',fontSize:'13px',backgroundColor:'#F9FAFB',borderRadius:'10px'}}>シフトがまだ確定していません</div>
+          :<div className="scrollable">
+            <table style={{width:'100%',borderCollapse:'collapse',fontSize:'12px'}}>
+              <thead><tr style={{backgroundColor:'#1E1B4B',color:'white'}}>{['日付','時間帯','種別','基本時給','曜日倍率','売上ボーナス','時間','給与','期間'].map(h=><th key={h} style={{padding:'7px 10px',textAlign:'center',fontWeight:'700',borderBottom:'2px solid #3730A3',whiteSpace:'nowrap'}}>{h}</th>)}</tr></thead>
+              <tbody>
+                {salary.slots_list.map((item,i)=>{
+                  const c=DAY_TYPE_CONF[item.type]||DAY_TYPE_CONF['平日'];
+                  const tier=item.salesTier;
+                  return(
+                  <tr key={i} style={{backgroundColor:tier?(i%2===0?tier.bg:'#F0FDF4'):(item.isInPeriod?(i%2===0?'white':'#FAFAFA'):'#FFFBEB')}}>
+                    <td style={{padding:'6px 10px',borderBottom:'1px solid #E5E7EB',textAlign:'center',fontWeight:'600'}}>{item.ds.slice(5).replace('-','/')}</td>
+                    <td style={{padding:'6px 10px',borderBottom:'1px solid #E5E7EB',textAlign:'center'}}>{item.slot}</td>
+                    <td style={{padding:'6px 10px',borderBottom:'1px solid #E5E7EB',textAlign:'center'}}><span style={{color:c.color,fontWeight:'700',fontSize:'11px'}}>{c.icon}{item.type}</span></td>
+                    <td style={{padding:'6px 10px',borderBottom:'1px solid #E5E7EB',textAlign:'center'}}>¥{(wageConfig.baseWages[staffId]||1000).toLocaleString()}</td>
+                    <td style={{padding:'6px 10px',borderBottom:'1px solid #E5E7EB',textAlign:'center',color:item.dayMult>1?'#D97706':'#6B7280',fontWeight:'700'}}>×{item.dayMult.toFixed(2)}</td>
+                    <td style={{padding:'6px 10px',borderBottom:'1px solid #E5E7EB',textAlign:'center'}}>
+                      {tier
+                        ?<div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:'2px'}}>
+                           <span style={{fontSize:'10px',fontWeight:'800',color:tier.color,backgroundColor:tier.bg,padding:'1px 6px',borderRadius:'6px',whiteSpace:'nowrap'}}>{tier.label}</span>
+                           <span style={{fontSize:'10px',fontWeight:'700',color:'#10B981'}}>+¥{item.bonusWage.toLocaleString()}</span>
+                         </div>
+                        :<span style={{color:'#D1D5DB',fontSize:'11px'}}>—</span>
+                      }
+                    </td>
+                    <td style={{padding:'6px 10px',borderBottom:'1px solid #E5E7EB',textAlign:'center'}}>{item.hours}h</td>
+                    <td style={{padding:'6px 10px',borderBottom:'1px solid #E5E7EB',textAlign:'right',fontWeight:'700',color:tier?'#10B981':'#4F46E5'}}>¥{item.wage.toLocaleString()}</td>
+                    <td style={{padding:'6px 10px',borderBottom:'1px solid #E5E7EB',textAlign:'center'}}>{item.isInPeriod?<Tag color='#15803D' bg='#DCFCE7'>今月</Tag>:<Tag color='#92400E' bg='#FEF9C3'>翌月</Tag>}</td>
+                  </tr>
+                );})}
+              </tbody>
+              <tfoot>
+                {hasSalesBonus&&<tr style={{backgroundColor:'#065F46',color:'white'}}>
+                  <td colSpan="7" style={{padding:'7px 10px',textAlign:'right',fontWeight:'700',fontSize:'12px'}}>うち売上ボーナス合計</td>
+                  <td style={{padding:'7px 10px',textAlign:'right',fontWeight:'900',fontSize:'14px'}}>+{fmtYen(salary.bonusTotal)}</td>
+                  <td/>
+                </tr>}
+                <tr style={{backgroundColor:'#1E1B4B',color:'white'}}>
+                  <td colSpan="7" style={{padding:'9px 10px',textAlign:'right',fontWeight:'700'}}>今月締め分合計</td>
+                  <td style={{padding:'9px 10px',textAlign:'right',fontWeight:'900',fontSize:'16px'}}>{fmtYen(salary.inPeriod)}</td>
+                  <td/>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        }
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  管理者アプリ
+  // ============================================================
+  const AdminApp = ({state,onLogout}) => {
+    const [tab,setTab]=useState(0),[showPinChange,setShowPinChange]=useState(false);
+    const {staff,slotConfig,storeSettings,wageConfig,submissionRules,specialDates,availability,confirmedShifts,pins,pinChanged,salesConfig,salesData,
+      setStaff,setSlotConfig,setStoreSettings,setWageConfig,setSubmissionRules,setSpecialDates,setAvailability,setConfirmedShifts,setPins,setPinChanged,setSalesConfig,setSalesData}=state;
+    const TABS=[{icon:'🏪',label:'店舗設定'},{icon:'📋',label:'提出ルール'},{icon:'👥',label:'スタッフ'},{icon:'💴',label:'賃金設定'},{icon:'✨',label:'自動作成'},{icon:'📅',label:'シフト確認'},{icon:'👁',label:'希望確認'},{icon:'📊',label:'売上管理'}];
+    const renderTab=()=>{
+      if(tab===0)return<AdminStoreSettings slotConfig={slotConfig}
+        onUpdateSlot={(i,f,v)=>setSlotConfig(p=>p.map((sc,idx)=>idx===i?{...sc,[f]:v}:sc))}
+        onAddSlot={()=>setSlotConfig(p=>[...p,{key:`slot${Date.now()}`,label:'新番',startH:21,endH:25}])}
+        onRemoveSlot={i=>setSlotConfig(p=>p.filter((_,idx)=>idx!==i))}
+        storeSettings={storeSettings}
+        onUpdateSettings={(day,slot,f,v)=>setStoreSettings(p=>({...p,[day]:{...p[day],[slot]:{...(p[day][slot]||{}),[f]:v}}}))}
+      />;
+      if(tab===1)return<AdminSubmissionRules rules={submissionRules} onUpdate={(k,v)=>setSubmissionRules(p=>({...p,[k]:v}))}/>;
+      if(tab===2)return<AdminStaffTab staff={staff} onAddStaff={s=>setStaff(p=>[...p,s])} onDeleteStaff={id=>setStaff(p=>p.filter(s=>s.id!==id))}
+        wageConfig={wageConfig} onUpdateWage={(type,key,val)=>setWageConfig(p=>({...p,[type]:{...p[type],[key]:val}}))}
+        pins={pins} pinChanged={pinChanged} onResetPin={id=>{setPins(p=>({...p,[id]:DEFAULT_PIN}));setPinChanged(p=>({...p,[id]:false}));}}/>;
+      if(tab===3)return<AdminWageTab wageConfig={wageConfig} onUpdateWage={(type,key,val)=>setWageConfig(p=>({...p,[type]:{...p[type],[key]:val}}))}
+        specialDates={specialDates} onUpdateSpecialDate={(ds,type)=>setSpecialDates(p=>{const n={...p};type?n[ds]=type:delete n[ds];return n;})}/>;
+      if(tab===4)return<AdminAutoGenerate slotConfig={slotConfig} storeSettings={storeSettings} availability={availability}
+        staff={staff} specialDates={specialDates} onConfirm={shifts=>setConfirmedShifts(shifts)}/>;
+      if(tab===5)return<AdminShiftCalendar slotConfig={slotConfig} confirmedShifts={confirmedShifts} staff={staff} specialDates={specialDates}/>;
+      if(tab===6)return<AdminRequestView availability={availability} staff={staff} specialDates={specialDates}/>;
+      if(tab===7)return<AdminSalesTab
+        salesConfig={salesConfig}
+        onUpdateConfig={(k,v)=>setSalesConfig(p=>({...p,[k]:v}))}
+        salesData={salesData}
+        onUpdateSalesData={(type,ds,val)=>setSalesData(p=>({...p,[type]:{...p[type],[ds]:val}}))}
+        specialDates={specialDates} confirmedShifts={confirmedShifts} staff={staff}/>;
+    };
+    return (
+      <div style={{maxWidth:'1100px',margin:'0 auto',padding:'10px'}}>
+        <div style={{background:'linear-gradient(135deg,#1E1B4B,#4F46E5)',borderRadius:'12px',padding:'11px 16px',marginBottom:'10px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div>
+            <span style={{color:'white',fontWeight:'900',fontSize:'17px'}}>📅 ShiftSync Pro</span>
+            <span style={{marginLeft:'10px',padding:'2px 8px',backgroundColor:'#7C3AED',borderRadius:'4px',color:'white',fontSize:'11px',fontWeight:'700'}}>管理者</span>
+          </div>
+          <div style={{display:'flex',gap:'6px'}}>
+            <button onClick={()=>setShowPinChange(true)} style={{padding:'5px 11px',backgroundColor:'rgba(255,255,255,0.15)',color:'white',border:'1px solid rgba(255,255,255,0.3)',borderRadius:'7px',cursor:'pointer',fontSize:'11px',fontWeight:'700'}}>🔑 PIN変更</button>
+            <button onClick={onLogout} style={{padding:'5px 11px',backgroundColor:'rgba(255,255,255,0.15)',color:'white',border:'1px solid rgba(255,255,255,0.3)',borderRadius:'7px',cursor:'pointer',fontSize:'11px',fontWeight:'700'}}>🔓 ログアウト</button>
+          </div>
+        </div>
+        <div style={{display:'flex',gap:'3px',marginBottom:'10px',backgroundColor:'white',padding:'6px',borderRadius:'12px',overflowX:'auto'}}>
+          {TABS.map((t,i)=><button key={i} onClick={()=>setTab(i)} style={{padding:'7px 11px',backgroundColor:tab===i?'#4F46E5':'transparent',color:tab===i?'white':'#6B7280',border:'none',borderRadius:'7px',cursor:'pointer',fontSize:'12px',fontWeight:'700',whiteSpace:'nowrap',flexShrink:0}}>{t.icon} {t.label}</button>)}
+        </div>
+        <Card>{renderTab()}</Card>
+        {showPinChange&&<PinChangeModal userId="admin" pins={pins} accentColor="#4F46E5"
+          onSave={p=>{setPins(prev=>({...prev,admin:p}));setPinChanged(prev=>({...prev,admin:true}));setShowPinChange(false);alert('管理者PINを変更しました。');}}
+          onClose={()=>setShowPinChange(false)}/>}
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  スタッフアプリ
+  // ============================================================
+  const StaffApp = ({staffId,state,onLogout}) => {
+    const [tab,setTab]=useState(0),[showPinChange,setShowPinChange]=useState(false);
+    const {staff,slotConfig,wageConfig,submissionRules,specialDates,availability,confirmedShifts,pins,salesData,salesConfig,setAvailability,setPins,setPinChanged}=state;
+    const me=staff.find(s=>s.id===staffId);
+    const TABS=[{icon:'📝',label:'希望カレンダー'},{icon:'💰',label:'給与シミュ'}];
+    const renderTab=()=>{
+      if(tab===0)return<StaffCalendar staffId={staffId} staff={staff} availability={availability}
+        onUpdateAvailability={(id,ds,entries)=>setAvailability(p=>({...p,[id]:{...(p[id]||{}),[ds]:entries}}))}
+        confirmedShifts={confirmedShifts} specialDates={specialDates} slotConfig={slotConfig} wageConfig={wageConfig}/>;
+      if(tab===1)return<StaffSalary staffId={staffId} staff={staff} confirmedShifts={confirmedShifts}
+        slotConfig={slotConfig} wageConfig={wageConfig} specialDates={specialDates} rules={submissionRules}
+        salesData={salesData} salesConfig={salesConfig}/>;
+    };
+    return (
+      <div style={{maxWidth:'900px',margin:'0 auto',padding:'10px'}}>
+        <div style={{background:`linear-gradient(135deg,${me?.color||'#4F46E5'}CC,${me?.color||'#4F46E5'})`,borderRadius:'12px',padding:'11px 16px',marginBottom:'10px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
+            <div style={{width:'32px',height:'32px',borderRadius:'50%',backgroundColor:'rgba(255,255,255,0.25)',display:'flex',alignItems:'center',justifyContent:'center',color:'white',fontWeight:'900',fontSize:'15px'}}>{me?.name?.[0]}</div>
+            <div><div style={{color:'white',fontWeight:'900',fontSize:'15px'}}>{me?.name}</div><div style={{color:'rgba(255,255,255,0.75)',fontSize:'11px'}}>{me?.role} ・ マイページ</div></div>
+          </div>
+          <div style={{display:'flex',gap:'6px'}}>
+            <button onClick={()=>setShowPinChange(true)} style={{padding:'5px 11px',backgroundColor:'rgba(255,255,255,0.15)',color:'white',border:'1px solid rgba(255,255,255,0.3)',borderRadius:'7px',cursor:'pointer',fontSize:'11px',fontWeight:'700'}}>🔑 PIN変更</button>
+            <button onClick={onLogout} style={{padding:'5px 11px',backgroundColor:'rgba(255,255,255,0.15)',color:'white',border:'1px solid rgba(255,255,255,0.3)',borderRadius:'7px',cursor:'pointer',fontSize:'11px',fontWeight:'700'}}>🔓 ログアウト</button>
+          </div>
+        </div>
+        <div style={{display:'flex',gap:'4px',marginBottom:'10px',backgroundColor:'white',padding:'6px',borderRadius:'12px'}}>
+          {TABS.map((t,i)=><button key={i} onClick={()=>setTab(i)} style={{padding:'7px 13px',backgroundColor:tab===i?(me?.color||'#4F46E5'):'transparent',color:tab===i?'white':'#6B7280',border:'none',borderRadius:'7px',cursor:'pointer',fontSize:'13px',fontWeight:'700'}}>{t.icon} {t.label}</button>)}
+        </div>
+        <Card>{renderTab()}</Card>
+        {showPinChange&&<PinChangeModal userId={staffId} pins={pins} accentColor={me?.color||'#4F46E5'}
+          onSave={p=>{setPins(prev=>({...prev,[staffId]:p}));setPinChanged(prev=>({...prev,[staffId]:true}));setShowPinChange(false);alert('PINを変更しました。次回から新しいPINでログインしてください。');}}
+          onClose={()=>setShowPinChange(false)}/>}
+      </div>
+    );
+  };
+
+  // ============================================================
+  //  メインアプリ
+  // ============================================================
+  const App = () => {
+    const [currentUser,    setCurrentUser]    = useState(null);
+    const [pendingSetup,   setPendingSetup]   = useState(null);
+    const [staff,          setStaff]          = useState(INIT_STAFF);
+    const [slotConfig,     setSlotConfig]     = useState(initSlotConfig());
+    const [storeSettings,  setStoreSettings]  = useState(initStoreSettings());
+    const [wageConfig,     setWageConfig]     = useState(initWageConfig());
+    const [submissionRules,setSubmissionRules]= useState(initSubmissionRules());
+    const [specialDates,   setSpecialDates]   = useState(INIT_SPECIAL_DATES);
+    const [availability,   setAvailability]   = useState(initAvailability());
+    const [confirmedShifts,setConfirmedShifts]= useState({});
+    const [pins,           setPins]           = useState(initPins());
+    const [pinChanged,     setPinChanged]     = useState(initPinChanged());
+    const [salesConfig,    setSalesConfig]    = useState(initSalesConfig());
+    const [salesData,      setSalesData]      = useState(initSalesData());
+
+    const sharedState={staff,slotConfig,storeSettings,wageConfig,submissionRules,specialDates,availability,confirmedShifts,pins,pinChanged,salesConfig,salesData,
+      setStaff,setSlotConfig,setStoreSettings,setWageConfig,setSubmissionRules,setSpecialDates,setAvailability,setConfirmedShifts,setPins,setPinChanged,setSalesConfig,setSalesData};
+
+    const handleLogin = user => {
+      const uid=user.role==='admin'?'admin':user.staffId;
+      if(!pinChanged[uid]){ setPendingSetup(user); }
+      else { setCurrentUser(user); }
+    };
+
+    const handleSetupComplete = newPin => {
+      const uid=pendingSetup.role==='admin'?'admin':pendingSetup.staffId;
+      setPins(p=>({...p,[uid]:newPin}));
+      setPinChanged(p=>({...p,[uid]:true}));
+      setCurrentUser(pendingSetup);
+      setPendingSetup(null);
+    };
+
+    const handleLogout = () => { setCurrentUser(null); setPendingSetup(null); };
+
+    if(pendingSetup) return <PinSetupScreen user={pendingSetup} staff={staff} onComplete={handleSetupComplete}/>;
+    if(!currentUser) return <LoginScreen staff={staff} pins={pins} onLogin={handleLogin}/>;
+    if(currentUser.role==='admin') return <AdminApp state={sharedState} onLogout={handleLogout}/>;
+    return <StaffApp staffId={currentUser.staffId} state={sharedState} onLogout={handleLogout}/>;
+  };
+
+  ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
